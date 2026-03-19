@@ -10,9 +10,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.LocationOn
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -29,7 +28,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -49,13 +47,13 @@ import com.hamradio.aaos.vm.MainViewModel
 private sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     object Home     : Screen("home",     "Home",     Icons.Default.Home)
     object Channels : Screen("channels", "Channels", Icons.AutoMirrored.Filled.List)
-    object Settings : Screen("settings", "Settings", Icons.Default.Tune)
-    object Aprs     : Screen("aprs",     "APRS",     Icons.Default.LocationOn)
+    object Settings : Screen("settings", "Settings", Icons.Default.Settings)
+    object Aprs     : Screen("aprs",     "APRS",     Icons.Default.Map)
     object Debug    : Screen("debug",    "Debug",    Icons.Default.BugReport)
 }
 
 private val TOP_LEVEL = listOf(
-    Screen.Home, Screen.Channels, Screen.Settings, Screen.Aprs,
+    Screen.Home, Screen.Channels, Screen.Settings, Screen.Aprs, Screen.Debug,
 )
 
 @Composable
@@ -64,7 +62,6 @@ fun AppNavigation(vm: MainViewModel) {
     val backEntry     by navController.currentBackStackEntryAsState()
     val currentRoute  = backEntry?.destination?.route
     val snackbarHostState = remember { SnackbarHostState() }
-    val showDebug by vm.showDebugTab.collectAsStateWithLifecycle()
 
     // Show error events as snackbars (H4)
     LaunchedEffect(Unit) {
@@ -88,8 +85,9 @@ fun AppNavigation(vm: MainViewModel) {
                         selected = selected,
                         onClick  = {
                             navController.navigate(screen.route) {
-                                popUpTo(navController.graph.findStartDestination().id) { saveState = false }
+                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                                 launchSingleTop = true
+                                restoreState    = true
                             }
                         },
                         icon  = {
@@ -122,17 +120,14 @@ fun AppNavigation(vm: MainViewModel) {
                 composable(Screen.Home.route) {
                     HomeScreen(vm = vm, onNavigateToChannels = {
                         navController.navigate(Screen.Channels.route) {
-                            popUpTo(navController.graph.findStartDestination().id) { saveState = false }
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
                             launchSingleTop = true
+                            restoreState    = true
                         }
                     })
                 }
                 composable(Screen.Channels.route) { ChannelsScreen(vm) }
-                composable(Screen.Settings.route)  {
-                    SettingsScreen(vm, onOpenDebug = {
-                        navController.navigate(Screen.Debug.route)
-                    })
-                }
+                composable(Screen.Settings.route)  { SettingsScreen(vm) }
                 composable(Screen.Aprs.route)      { AprsScreen(vm) }
                 composable(Screen.Debug.route)     { DebugScreen(vm) }
             }

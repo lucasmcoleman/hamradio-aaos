@@ -56,6 +56,9 @@ import com.hamradio.aaos.vm.MainViewModel
 
 @Composable
 fun AprsScreen(vm: MainViewModel) {
+    Text("APRS placeholder", color = androidx.compose.ui.graphics.Color.White)
+    return
+    @Suppress("UNREACHABLE_CODE")
     val bss by vm.bssSettings.collectAsStateWithLifecycle()
     val channels by vm.channels.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
