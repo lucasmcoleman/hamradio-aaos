@@ -133,7 +133,9 @@ fun AppNavigation(vm: MainViewModel) {
                     })
                 }
                 composable(Screen.Aprs.route)      { AprsScreen(vm) }
-                composable(Screen.Debug.route)     { DebugScreen(vm) }
+                composable(Screen.Debug.route)     {
+                    DebugScreen(vm, onClose = { navController.popBackStack() })
+                }
             }
         }
     }
