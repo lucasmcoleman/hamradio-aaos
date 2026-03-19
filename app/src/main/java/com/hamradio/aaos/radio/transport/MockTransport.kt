@@ -52,24 +52,28 @@ class MockTransport(
     private var squelchOpen = false
     private val subscribedNotifications = mutableSetOf<Int>()
 
+    /** Stored settings bytes — persisted across read/write cycles. */
+    private var storedSettingsData: ByteArray? = null
+    private var storedBssData: ByteArray? = null
+
     /** Simulated channel list — representative ham channels */
     private val channelList: MutableList<RfChannel> = mutableListOf(
-        rfCh(0,  "146.520",  146_520_000, 146_520_000, SubAudio.None,          SubAudio.None,          "SIMPLEX"),
-        rfCh(1,  "146.460",  146_460_000, 146_460_000, SubAudio.None,          SubAudio.None,          "LOCAL"),
-        rfCh(2,  "146.940-", 146_940_000, 147_540_000, SubAudio.Ctcss(100.0f), SubAudio.Ctcss(100.0f), "COUNTY1"),
-        rfCh(3,  "147.000+", 147_000_000, 146_400_000, SubAudio.Ctcss(103.5f), SubAudio.Ctcss(103.5f), "COUNTY2"),
-        rfCh(4,  "147.180+", 147_180_000, 146_580_000, SubAudio.Ctcss(127.3f), SubAudio.Ctcss(127.3f), "HILLTOP"),
-        rfCh(5,  "443.000+", 443_000_000, 448_000_000, SubAudio.Ctcss(88.5f),  SubAudio.Ctcss(88.5f),  "UHF-RPT"),
-        rfCh(6,  "446.000",  446_000_000, 446_000_000, SubAudio.None,          SubAudio.None,          "UHF-SIM"),
-        rfCh(7,  "144.390",  144_390_000, 144_390_000, SubAudio.None,          SubAudio.None,          "APRS"),
-        rfCh(8,  "147.435+", 147_435_000, 146_835_000, SubAudio.Ctcss(110.9f), SubAudio.Ctcss(110.9f), "EMER-1"),
-        rfCh(9,  "155.340",  155_340_000, 155_340_000, SubAudio.None,          SubAudio.None,          "SKYWRN"),
-        rfCh(10, "162.400",  162_400_000, 162_400_000, SubAudio.None,          SubAudio.None,          "WX-1"),
-        rfCh(11, "162.425",  162_425_000, 162_425_000, SubAudio.None,          SubAudio.None,          "WX-2"),
-        rfCh(12, "162.450",  162_450_000, 162_450_000, SubAudio.None,          SubAudio.None,          "WX-3"),
-        rfCh(13, "446.025",  446_025_000, 446_025_000, SubAudio.Dcs(23),       SubAudio.Dcs(23),       "GMRS-1"),
-        rfCh(14, "446.050",  446_050_000, 446_050_000, SubAudio.Dcs(71),       SubAudio.Dcs(71),       "GMRS-2"),
-        rfCh(15, "446.075",  446_075_000, 446_075_000, SubAudio.None,          SubAudio.None,          "GMRS-3"),
+        rfCh(0,  146_520_000, 146_520_000, SubAudio.None,          SubAudio.None,          "SIMPLEX"),
+        rfCh(1,  146_460_000, 146_460_000, SubAudio.None,          SubAudio.None,          "LOCAL"),
+        rfCh(2,  146_940_000, 147_540_000, SubAudio.Ctcss(100.0f), SubAudio.Ctcss(100.0f), "COUNTY1"),
+        rfCh(3,  147_000_000, 146_400_000, SubAudio.Ctcss(103.5f), SubAudio.Ctcss(103.5f), "COUNTY2"),
+        rfCh(4,  147_180_000, 146_580_000, SubAudio.Ctcss(127.3f), SubAudio.Ctcss(127.3f), "HILLTOP"),
+        rfCh(5,  443_000_000, 448_000_000, SubAudio.Ctcss(88.5f),  SubAudio.Ctcss(88.5f),  "UHF-RPT"),
+        rfCh(6,  446_000_000, 446_000_000, SubAudio.None,          SubAudio.None,          "UHF-SIM"),
+        rfCh(7,  144_390_000, 144_390_000, SubAudio.None,          SubAudio.None,          "APRS"),
+        rfCh(8,  147_435_000, 146_835_000, SubAudio.Ctcss(110.9f), SubAudio.Ctcss(110.9f), "EMER-1"),
+        rfCh(9,  155_340_000, 155_340_000, SubAudio.None,          SubAudio.None,          "SKYWRN"),
+        rfCh(10, 162_400_000, 162_400_000, SubAudio.None,          SubAudio.None,          "WX-1"),
+        rfCh(11, 162_425_000, 162_425_000, SubAudio.None,          SubAudio.None,          "WX-2"),
+        rfCh(12, 162_450_000, 162_450_000, SubAudio.None,          SubAudio.None,          "WX-3"),
+        rfCh(13, 446_025_000, 446_025_000, SubAudio.Dcs(23),       SubAudio.Dcs(23),       "GMRS-1"),
+        rfCh(14, 446_050_000, 446_050_000, SubAudio.Dcs(71),       SubAudio.Dcs(71),       "GMRS-2"),
+        rfCh(15, 446_075_000, 446_075_000, SubAudio.None,          SubAudio.None,          "GMRS-3"),
     )
 
     // -----------------------------------------------------------------------
@@ -130,15 +134,16 @@ class MockTransport(
             BasicCommand.READ_RF_CH         -> replyChannel(msg.body.firstOrNull()?.toInt()?.and(0xFF) ?: 0)
             BasicCommand.GET_VOLUME         -> replyVolume()
             BasicCommand.SET_VOLUME         -> { volumeLevel = msg.body.firstOrNull()?.toInt()?.and(0xFF) ?: volumeLevel; replyOk(msg.command) }
-            BasicCommand.SET_IN_SCAN        -> { isScanActive = msg.body.firstOrNull()?.toInt() != 0; replyOk(msg.command) }
+            BasicCommand.SET_IN_SCAN        -> handleScan(msg.body.firstOrNull()?.toInt() != 0)
             BasicCommand.WRITE_SETTINGS     -> applySettings(msg.body)
+            BasicCommand.WRITE_BSS_SETTINGS -> applyBssSettings(msg.body)
             BasicCommand.WRITE_RF_CH        -> applyChannel(msg.body)
             BasicCommand.STORE_SETTINGS     -> replyOk(msg.command)
             BasicCommand.READ_STATUS        -> replyBattery(msg.body.getOrNull(1)?.toInt()?.and(0xFF) ?: PowerStatusType.BATTERY_PERCENTAGE)
             BasicCommand.REGISTER_NOTIFICATION -> { subscribedNotifications.add(msg.body.firstOrNull()?.toInt() ?: 0); replyOk(msg.command) }
             BasicCommand.CANCEL_NOTIFICATION   -> { subscribedNotifications.remove(msg.body.firstOrNull()?.toInt() ?: 0); replyOk(msg.command) }
             BasicCommand.GET_POSITION       -> replyPosition()
-            BasicCommand.SET_HT_ON_OFF      -> replyOk(msg.command)
+            BasicCommand.SET_HT_ON_OFF      -> handlePtt(msg.body.firstOrNull()?.toInt() != 0)
             BasicCommand.STOP_RINGING       -> replyOk(msg.command)
             BasicCommand.GET_APRS_PATH      -> replyAprsPath()
             else                            -> replyOk(msg.command)
@@ -187,26 +192,39 @@ class MockTransport(
     }
 
     private suspend fun replySettings() {
+        val body = storedSettingsData ?: buildDefaultSettingsData()
+        // Always reflect current channel/scan state from mock's live state
+        body[0]  = ((currentChannelA and 0x0F) shl 4 or (currentChannelB and 0x0F)).toByte()
+        body[1]  = (body[1].toInt() and 0x7F or (if (isScanActive) 0x80 else 0)).toByte()
+        body[9]  = ((currentChannelA and 0xF0) or ((currentChannelB and 0xF0) shr 4)).toByte()
+        emit(BenshiMessage(CommandGroup.BASIC, BasicCommand.READ_SETTINGS, true, byteArrayOf(0x00) + body))
+    }
+
+    private fun buildDefaultSettingsData(): ByteArray {
         val body = ByteArray(21)
         body[0]  = ((currentChannelA and 0x0F) shl 4 or (currentChannelB and 0x0F)).toByte()
-        body[1]  = ((if (isScanActive) 0x80 else 0) or 0x10 or 0x04).toByte()  // dual-watch, squelch=4
+        body[1]  = ((if (isScanActive) 0x80 else 0) or 0x10 or 0x04).toByte()  // dual-watch=1, squelch=4
         body[4]  = ((2 shl 6) or (4 shl 3)).toByte()   // local spk=2, bt mic gain=4
         body[9]  = ((currentChannelA and 0xF0) or ((currentChannelB and 0xF0) shr 4)).toByte()
         putInt(body, 12, (144_390_000L / 100L).toInt())  // VFO1 = 144.390
         putInt(body, 16, (446_000_000L / 100L).toInt())  // VFO2 = 446.000
-        emit(BenshiMessage(CommandGroup.BASIC, BasicCommand.READ_SETTINGS, true, byteArrayOf(0x00) + body))
+        return body
     }
 
     private suspend fun replyBssSettings() {
+        val body = storedBssData ?: buildDefaultBssData()
+        emit(BenshiMessage(CommandGroup.BASIC, BasicCommand.READ_BSS_SETTINGS, true, byteArrayOf(0x00) + body))
+    }
+
+    private fun buildDefaultBssData(): ByteArray {
         val body = ByteArray(46)
         body[0] = ((3 shl 4) or 7).toByte()  // maxFwd=3, ttl=7
         body[1] = 0xFE.toByte()              // all flags set except packet format
         body[2] = 0x00
         body[3] = 6                           // 60 second interval
-        // callsign: N0CALL
         "N0CALL".forEachIndexed { i, c -> body[40 + i] = c.code.toByte() }
         "/>".forEachIndexed { i, c -> body[38 + i] = c.code.toByte() }
-        emit(BenshiMessage(CommandGroup.BASIC, BasicCommand.READ_BSS_SETTINGS, true, byteArrayOf(0x00) + body))
+        return body
     }
 
     private suspend fun replyBattery(type: Int) {
@@ -239,21 +257,55 @@ class MockTransport(
 
     private suspend fun applySettings(body: ByteArray) {
         if (body.size >= 10) {
+            storedSettingsData = body.copyOf()
             currentChannelA = ((body[9].toInt() and 0xF0)) or ((body[0].toInt() and 0xF0) shr 4)
             currentChannelB = ((body[9].toInt() and 0x0F) shl 4) or (body[0].toInt() and 0x0F)
             isScanActive    = (body[1].toInt() and 0x80) != 0
         }
         replyOk(BasicCommand.WRITE_SETTINGS)
-        // Notify settings changed
         if (RadioNotification.HT_SETTINGS_CHANGED.code in subscribedNotifications) {
             emitNotification(RadioNotification.HT_SETTINGS_CHANGED)
+        }
+    }
+
+    private suspend fun applyBssSettings(body: ByteArray) {
+        if (body.size >= 46) {
+            storedBssData = body.copyOf()
+        }
+        replyOk(BasicCommand.WRITE_BSS_SETTINGS)
+        if (RadioNotification.BSS_SETTINGS_CHANGED.code in subscribedNotifications) {
+            emitNotification(RadioNotification.BSS_SETTINGS_CHANGED)
+        }
+    }
+
+    private suspend fun handleScan(enable: Boolean) {
+        isScanActive = enable
+        // Also update stored settings so READ_SETTINGS returns the new scan state
+        storedSettingsData?.let { data ->
+            data[1] = (data[1].toInt() and 0x7F or (if (enable) 0x80 else 0)).toByte()
+        }
+        replyOk(BasicCommand.SET_IN_SCAN)
+        if (RadioNotification.HT_STATUS_CHANGED.code in subscribedNotifications) {
+            emitNotification(RadioNotification.HT_STATUS_CHANGED, buildHtStatusBytes())
+        }
+        // Trigger settings re-read so SettingsScreen.scan updates
+        if (RadioNotification.HT_SETTINGS_CHANGED.code in subscribedNotifications) {
+            emitNotification(RadioNotification.HT_SETTINGS_CHANGED)
+        }
+    }
+
+    private suspend fun handlePtt(transmit: Boolean) {
+        isInTx = transmit
+        replyOk(BasicCommand.SET_HT_ON_OFF)
+        if (RadioNotification.HT_STATUS_CHANGED.code in subscribedNotifications) {
+            emitNotification(RadioNotification.HT_STATUS_CHANGED, buildHtStatusBytes())
         }
     }
 
     private suspend fun applyChannel(body: ByteArray) {
         if (body.size >= 25) {
             val decoded = RfChannel.decode(body)
-            if (decoded != null) {
+            if (decoded != null && decoded.channelId <= 200) {
                 val idx = decoded.channelId
                 while (channelList.size <= idx) channelList.add(channelList.last().copy(channelId = channelList.size))
                 channelList[idx] = decoded
@@ -320,7 +372,8 @@ class MockTransport(
                  (if (isInTx) 0x40 else 0) or
                  (if (squelchOpen) 0x20 else 0) or
                  (if (isInRx) 0x10 else 0) or
-                 0x04                                      // dual-watch
+                 0x04 or                                   // dual-watch
+                 (if (isScanActive) 0x02 else 0)           // scan
         val b1 = ((currentChannelA and 0x0F) shl 4) or
                  (if (gpsLocked) 0x08 else 0)
         val rssi = if (isInRx) (6..12).random() else 0
@@ -330,7 +383,7 @@ class MockTransport(
     }
 
     private fun rfCh(
-        id: Int, freq: String, txHz: Long, rxHz: Long,
+        id: Int, txHz: Long, rxHz: Long,
         txSub: SubAudio, rxSub: SubAudio, name: String,
     ) = RfChannel(
         channelId   = id,

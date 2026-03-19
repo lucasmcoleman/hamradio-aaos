@@ -1,6 +1,5 @@
 package com.hamradio.aaos.radio.transport
 
-import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -14,6 +13,8 @@ import android.util.Log
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.util.UUID
 
 private const val TAG = "BleTransport"
@@ -35,19 +37,21 @@ private val CCCD_UUID     = UUID.fromString("00002902-0000-1000-8000-00805f9b34f
 /**
  * BLE transport implementation using Android's BluetoothGatt API.
  *
- * Connects to the radio's Benshi BLE service, enables indications on
- * the indicate characteristic, and sends raw [BenshiMessage] bytes
- * (no GAIA wrapping — BLE transport uses raw messages).
+ * Connection flow: discover services -> negotiate MTU -> enable indications
+ * (CCCD write confirmed) -> CONNECTED. Incoming data is buffered for
+ * reassembly in case BLE fragments large payloads across multiple indications.
  */
 class BleTransport(
     private val context: Context,
     private val deviceAddress: String,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
+    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : IRadioTransport {
 
     private var gatt: BluetoothGatt? = null
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
     private val sendChannel = Channel<ByteArray>(Channel.BUFFERED)
+    private var sendJob: Job? = null
+    private val receiveBuffer = ByteArrayOutputStream()
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState = _connectionState.asStateFlow()
@@ -93,7 +97,15 @@ class BleTransport(
                 _connectionState.value = ConnectionState.ERROR
                 return
             }
-            // Enable indications
+            // Negotiate larger MTU before enabling indications
+            gatt.requestMtu(512)
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            Log.d(TAG, "MTU negotiated: $mtu (status=$status)")
+            // Enable indications now that MTU is set
+            val service = gatt.getService(SERVICE_UUID) ?: return
+            val indicateChar = service.getCharacteristic(INDICATE_UUID) ?: return
             gatt.setCharacteristicNotification(indicateChar, true)
             val descriptor = indicateChar.getDescriptor(CCCD_UUID)
             if (descriptor != null) {
@@ -106,11 +118,21 @@ class BleTransport(
                     gatt.writeDescriptor(descriptor)
                 }
             }
-            Log.d(TAG, "BLE setup complete — radio connected")
-            _connectionState.value = ConnectionState.CONNECTED
+        }
 
-            // Start send worker
-            scope.launch { sendWorker() }
+        override fun onDescriptorWrite(
+            gatt: BluetoothGatt,
+            descriptor: BluetoothGattDescriptor,
+            status: Int,
+        ) {
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                Log.d(TAG, "CCCD write success — radio connected")
+                _connectionState.value = ConnectionState.CONNECTED
+                sendJob = scope.launch { sendWorker() }
+            } else {
+                Log.e(TAG, "CCCD write failed: $status")
+                _connectionState.value = ConnectionState.ERROR
+            }
         }
 
         override fun onCharacteristicChanged(
@@ -119,9 +141,22 @@ class BleTransport(
             value: ByteArray,
         ) {
             if (characteristic.uuid == INDICATE_UUID) {
-                BenshiMessage.decode(value)?.let {
-                    scope.launch { _inbound.emit(it) }
-                } ?: Log.w(TAG, "Could not decode inbound message: ${value.toHexString()}")
+                synchronized(receiveBuffer) {
+                    receiveBuffer.write(value)
+                    val buf = receiveBuffer.toByteArray()
+                    if (buf.size >= 4) {
+                        BenshiMessage.decode(buf)?.let { msg ->
+                            scope.launch { _inbound.emit(msg) }
+                            receiveBuffer.reset()
+                            return
+                        }
+                    }
+                    // Prevent unbounded growth from unparseable data
+                    if (receiveBuffer.size() > 1024) {
+                        Log.w(TAG, "Receive buffer overflow (${receiveBuffer.size()} bytes), clearing")
+                        receiveBuffer.reset()
+                    }
+                }
             }
         }
 
@@ -149,24 +184,31 @@ class BleTransport(
     }
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
+        sendJob?.cancel()
         sendChannel.close()
         gatt?.disconnect()
         gatt?.close()
         gatt = null
+        writeCharacteristic = null
+        synchronized(receiveBuffer) { receiveBuffer.reset() }
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
     private suspend fun sendWorker() = withContext(Dispatchers.IO) {
         for (bytes in sendChannel) {
-            val char = writeCharacteristic ?: break
-            val g = gatt ?: break
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+            val char = writeCharacteristic
+            val g = gatt
+            if (char == null || g == null) {
+                Log.w(TAG, "GATT or characteristic null, dropping message")
             } else {
-                @Suppress("DEPRECATION")
-                char.value = bytes
-                @Suppress("DEPRECATION")
-                g.writeCharacteristic(char)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                } else {
+                    @Suppress("DEPRECATION")
+                    char.value = bytes
+                    @Suppress("DEPRECATION")
+                    g.writeCharacteristic(char)
+                }
             }
         }
     }

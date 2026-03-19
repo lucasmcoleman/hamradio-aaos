@@ -92,6 +92,7 @@ object GaiaFrame {
         frame[0] = SYNC
         frame[1] = VERSION
         frame[2] = if (withChecksum) FLAG_CHECKSUM.toByte() else 0
+        require(payloadLen <= 255) { "Benshi payload too large: $payloadLen bytes" }
         frame[3] = payloadLen.toByte()
         msgBytes.copyInto(frame, 4)
         if (withChecksum) {
@@ -182,6 +183,12 @@ object RadioCommands {
         val body = RfChannel.encode(channel)
         return BenshiMessage.basic(BasicCommand.WRITE_RF_CH, body)
     }
+
+    fun writeSettings(data: ByteArray): BenshiMessage =
+        BenshiMessage.basic(BasicCommand.WRITE_SETTINGS, data)
+
+    fun writeBssSettings(data: ByteArray): BenshiMessage =
+        BenshiMessage.basic(BasicCommand.WRITE_BSS_SETTINGS, data)
 
     fun storeSettings() = BenshiMessage.basic(BasicCommand.STORE_SETTINGS)
 

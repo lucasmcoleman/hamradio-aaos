@@ -9,21 +9,30 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Divider
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,9 +48,14 @@ import com.hamradio.aaos.ui.theme.SurfaceElevated
 import com.hamradio.aaos.vm.MainViewModel
 
 @Composable
-fun SettingsScreen(vm: MainViewModel) {
+fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val rxRoute    by vm.rxAudioRoute.collectAsStateWithLifecycle()
+    val txRoute    by vm.txMicRoute.collectAsStateWithLifecycle()
+    val autoSwitch by vm.autoSwitchOnRx.collectAsStateWithLifecycle()
+    val showDebug  by vm.showDebugTab.collectAsStateWithLifecycle()
     val isMock   = vm.isMockMode
+    var showScanConfirm by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -69,37 +83,35 @@ fun SettingsScreen(vm: MainViewModel) {
                 LevelSlider(
                     value    = s.squelchLevel,
                     max      = 9,
-                    onValue  = { /* write_settings TODO: individual field write */ },
+                    onValue  = { v -> vm.updateSettings { it.copy(squelchLevel = v) } },
                 )
-            }
-            SettingRow("Mic Gain") {
-                LevelSlider(value = s.micGain, max = 7, onValue = {})
             }
             SettingRow("Scan") {
                 Switch(
                     checked         = s.scan,
-                    onCheckedChange = { vm.setScan(it) },
+                    onCheckedChange = { newVal ->
+                        if (newVal) vm.setScan(true)
+                        else showScanConfirm = true
+                    },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
             }
-            SettingRow("Dual Watch") {
-                Text(
-                    text  = when (s.doubleChannel) { 0 -> "Off"; 1 -> "Dual"; else -> "Triple" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Accent,
-                )
-            }
+            CyclableSettingRow(
+                label = "Dual Watch",
+                value = when (s.doubleChannel) { 0 -> "Off"; 1 -> "Single"; else -> "Dual" },
+                onCycle = { vm.updateSettings { it.copy(doubleChannel = (it.doubleChannel + 1) % 3) } },
+            )
             SettingRow("Tail Elimination") {
                 Switch(
                     checked         = s.tailElim,
-                    onCheckedChange = {},
+                    onCheckedChange = { v -> vm.updateSettings { it.copy(tailElim = v) } },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
             }
             SettingRow("PTT Lock") {
                 Switch(
                     checked         = s.pttLock,
-                    onCheckedChange = {},
+                    onCheckedChange = { v -> vm.updateSettings { it.copy(pttLock = v) } },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
             }
@@ -109,63 +121,106 @@ fun SettingsScreen(vm: MainViewModel) {
             SettingRow("Auto Power On") {
                 Switch(
                     checked         = s.autoPowerOn,
-                    onCheckedChange = {},
+                    onCheckedChange = { v -> vm.updateSettings { it.copy(autoPowerOn = v) } },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
             }
             SettingRow("Power Saving") {
                 Switch(
                     checked         = s.powerSavingMode,
-                    onCheckedChange = {},
+                    onCheckedChange = { v -> vm.updateSettings { it.copy(powerSavingMode = v) } },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
             }
-            SettingRow("Auto Power Off") {
-                Text(
-                    text  = if (s.autoPowerOff == 0) "Disabled" else "${s.autoPowerOff * 10} min",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Accent,
-                )
-            }
+            CyclableSettingRow(
+                label = "Auto Power Off",
+                value = if (s.autoPowerOff == 0) "Disabled" else "${s.autoPowerOff * 10} min",
+                onCycle = { vm.updateSettings { it.copy(autoPowerOff = (it.autoPowerOff + 1) % 7) } },
+            )
         }
 
         SettingsGroup("GPS") {
-            SettingRow("Positioning System") {
-                Text(
-                    text  = when (s.positioningSystem) { 0 -> "GPS"; 1 -> "BDS"; else -> "GPS+BDS" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Accent,
-                )
-            }
+            CyclableSettingRow(
+                label = "Positioning System",
+                value = when (s.positioningSystem) { 0 -> "GPS"; 1 -> "BDS"; else -> "GPS+BDS" },
+                onCycle = { vm.updateSettings { it.copy(positioningSystem = (it.positioningSystem + 1) % 3) } },
+            )
             SettingRow("Imperial Units") {
                 Switch(
                     checked         = s.imperialUnit,
-                    onCheckedChange = {},
+                    onCheckedChange = { v -> vm.updateSettings { it.copy(imperialUnit = v) } },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
             }
         }
 
-        SettingsGroup("Audio") {
-            SettingRow("Local Speaker") {
-                Text(
-                    text  = when (s.localSpeaker) { 0 -> "Off"; 1 -> "Low"; 2 -> "Medium"; else -> "High" },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Accent,
+        SettingsGroup("Audio Routing") {
+            CyclableSettingRow(
+                label = "RX Speaker",
+                value = when (rxRoute) { 0 -> "Radio"; 1 -> "Vehicle"; else -> "Both" },
+                onCycle = { vm.setRxAudioRoute((rxRoute + 1) % 3) },
+            )
+            CyclableSettingRow(
+                label = "TX Microphone",
+                value = when (txRoute) { 0 -> "Radio"; 1 -> "Vehicle"; else -> "Auto" },
+                onCycle = { vm.setTxMicRoute((txRoute + 1) % 3) },
+            )
+        }
+
+        SettingsGroup("Behavior") {
+            SettingRow("Auto-Switch on RX") {
+                Switch(
+                    checked         = autoSwitch,
+                    onCheckedChange = { vm.setAutoSwitchOnRx(it) },
+                    colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
-            }
-            SettingRow("BT Mic Gain") {
-                LevelSlider(value = s.btMicGain, max = 7, onValue = {})
             }
         }
 
-        if (isMock) {
-            SettingsGroup("Debug") {
-                SettingRow("Mock Radio Active") {
-                    Text("ON", style = MaterialTheme.typography.bodyMedium, color = Accent)
-                }
+        SettingsGroup("Audio Levels") {
+            CyclableSettingRow(
+                label = "Local Speaker",
+                value = when (s.localSpeaker) { 0 -> "Off"; 1 -> "Low"; 2 -> "Medium"; else -> "High" },
+                onCycle = { vm.updateSettings { it.copy(localSpeaker = (it.localSpeaker + 1) % 4) } },
+            )
+            SettingRow("Mic Gain") {
+                LevelSlider(value = s.micGain, max = 7, onValue = { v -> vm.updateSettings { it.copy(micGain = v) } })
+            }
+            SettingRow("BT Mic Gain") {
+                LevelSlider(value = s.btMicGain, max = 7, onValue = { v -> vm.updateSettings { it.copy(btMicGain = v) } })
             }
         }
+
+        SettingsGroup("Developer") {
+            SettingRow("Mock Radio") {
+                Switch(
+                    checked         = isMock,
+                    onCheckedChange = { vm.toggleMockMode() },
+                    colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
+                )
+            }
+            CyclableSettingRow(
+                label = "Debug Console",
+                value = "Open",
+                onCycle = onOpenDebug,
+            )
+        }
+    }
+
+    if (showScanConfirm) {
+        AlertDialog(
+            onDismissRequest = { showScanConfirm = false },
+            title = { Text("Stop Scan?") },
+            text  = { Text("The radio will stop on the current channel.") },
+            confirmButton = {
+                TextButton(onClick = { vm.setScan(false); showScanConfirm = false }) {
+                    Text("Stop", color = Accent)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showScanConfirm = false }) { Text("Cancel") }
+            },
+        )
     }
 }
 
@@ -183,7 +238,7 @@ private fun SettingsGroup(title: String, content: @Composable () -> Unit) {
             color    = Accent,
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
         )
-        Divider(color = Outline)
+        HorizontalDivider(color = Outline)
         content()
     }
 }
@@ -204,7 +259,40 @@ private fun SettingRow(label: String, control: @Composable () -> Unit) {
         )
         control()
     }
-    Divider(color = Outline.copy(alpha = 0.3f), modifier = Modifier.padding(start = 16.dp))
+    HorizontalDivider(color = Outline.copy(alpha = 0.3f), modifier = Modifier.padding(start = 16.dp))
+}
+
+/** Tap-to-cycle setting row with a chevron indicating interactivity. */
+@Composable
+private fun CyclableSettingRow(label: String, value: String, onCycle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onCycle)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text  = label,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                text  = value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Accent,
+            )
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = "Cycle",
+                tint = OnSurfaceMuted,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+    HorizontalDivider(color = Outline.copy(alpha = 0.3f), modifier = Modifier.padding(start = 16.dp))
 }
 
 @Composable

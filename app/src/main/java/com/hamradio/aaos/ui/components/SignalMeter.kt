@@ -80,7 +80,9 @@ fun SignalMeter(
         if (label) {
             Spacer(Modifier.height(4.dp))
             Text(
-                text  = if (isActive) "S${rssi.coerceIn(0, 9)}" else "S0",
+                text  = if (!isActive) "S0"
+                        else if (rssi <= 9) "S$rssi"
+                        else "S9+${(rssi - 9) * 10}",
                 style = MaterialTheme.typography.labelSmall,
                 color = if (isActive) RxGreen else MaterialTheme.colorScheme.onSurfaceVariant,
             )

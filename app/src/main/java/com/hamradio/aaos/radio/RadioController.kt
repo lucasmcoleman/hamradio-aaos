@@ -1,5 +1,9 @@
 package com.hamradio.aaos.radio
 
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.util.Log
 import com.hamradio.aaos.radio.protocol.BasicCommand
 import com.hamradio.aaos.radio.protocol.BenshiMessage
@@ -14,16 +18,22 @@ import com.hamradio.aaos.radio.protocol.ReplyStatus
 import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.transport.ConnectionState
 import com.hamradio.aaos.radio.transport.IRadioTransport
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -33,9 +43,12 @@ private const val MAX_CHANNELS = 64
 @Singleton
 class RadioController @Inject constructor(
     private val transport: IRadioTransport,
+    @ApplicationContext private val context: Context,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var collectJob: Job? = null
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
 
     // -----------------------------------------------------------------------
     // Public state
@@ -64,7 +77,17 @@ class RadioController @Inject constructor(
     private val _batteryPercent  = MutableStateFlow(-1)
     val batteryPercent: StateFlow<Int> = _batteryPercent.asStateFlow()
 
+    /** One-shot error events for UI snackbar display. */
+    private val _errorEvent = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val errorEvent: kotlinx.coroutines.flow.Flow<String> = _errorEvent
+
+    /** Debounce counters for settings writes — avoids flooding BLE on slider drags. */
+    private val settingsWriteGen = AtomicInteger(0)
+    private val bssWriteGen = AtomicInteger(0)
+    private companion object { const val SETTINGS_DEBOUNCE_MS = 500L }
+
     /** Raw message log for the debug screen (newest first, capped at 200). */
+    private val logBuffer = ArrayDeque<LogEntry>(200)
     private val _messageLog      = MutableStateFlow<List<LogEntry>>(emptyList())
     val messageLog: StateFlow<List<LogEntry>> = _messageLog.asStateFlow()
 
@@ -77,7 +100,8 @@ class RadioController @Inject constructor(
             try {
                 transport.connect()
                 startCollecting()
-                initializeRadio()
+                withTimeoutOrNull(10_000L) { initializeRadio() }
+                    ?: Log.w(TAG, "Radio init sequence timed out")
             } catch (e: Exception) {
                 Log.e(TAG, "Connect failed", e)
             }
@@ -86,7 +110,7 @@ class RadioController @Inject constructor(
 
     fun disconnect() {
         scope.launch {
-            collectJob?.cancel()
+            collectJob?.cancelAndJoin()
             transport.disconnect()
             _htStatus.value = HtStatus.DISCONNECTED
             _deviceInfo.value = null
@@ -116,12 +140,82 @@ class RadioController @Inject constructor(
 
     fun setHtPower(on: Boolean) = sendCmd(RadioCommands.setHtOnOff(on))
 
+    fun pttDown() {
+        requestAudioFocus()
+        sendCmd(RadioCommands.setHtOnOff(true))
+    }
+
+    fun pttUp() {
+        sendCmd(RadioCommands.setHtOnOff(false))
+        abandonAudioFocus()
+    }
+
+    private fun requestAudioFocus() {
+        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+            )
+            .build()
+        audioFocusRequest = request
+        audioManager.requestAudioFocus(request)
+    }
+
+    private fun abandonAudioFocus() {
+        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        audioFocusRequest = null
+    }
+
     fun saveChannel(channel: RfChannel) {
+        // Optimistic UI update
+        val list = _channels.value.toMutableList()
+        val idx = list.indexOfFirst { it.channelId == channel.channelId }
+        if (idx >= 0) list[idx] = channel else list.add(channel)
+        list.sortBy { it.channelId }
+        _channels.value = list
+        // Write to radio
         sendCmd(RadioCommands.writeChannel(channel))
         sendCmd(RadioCommands.storeSettings())
     }
 
+    fun updateSettings(transform: (RadioSettings) -> RadioSettings) {
+        val current = _settings.value ?: return
+        val updated = transform(current)
+        _settings.value = updated  // optimistic UI update
+        val gen = settingsWriteGen.incrementAndGet()
+        scope.launch {
+            delay(SETTINGS_DEBOUNCE_MS)
+            if (settingsWriteGen.get() == gen) {
+                applySettings(_settings.value ?: return@launch)
+            }
+        }
+    }
+
+    fun updateBssSettings(transform: (BssSettings) -> BssSettings) {
+        val current = _bssSettings.value ?: return
+        val updated = transform(current)
+        _bssSettings.value = updated  // optimistic UI update
+        val gen = bssWriteGen.incrementAndGet()
+        scope.launch {
+            delay(SETTINGS_DEBOUNCE_MS)
+            if (bssWriteGen.get() == gen) {
+                val data = (_bssSettings.value ?: return@launch).patchRawData()
+                sendCmd(RadioCommands.writeBssSettings(data))
+                sendCmd(RadioCommands.storeSettings())
+            }
+        }
+    }
+
     fun sendRaw(message: BenshiMessage) = sendCmd(message)
+
+    fun clearLog() {
+        synchronized(logBuffer) {
+            logBuffer.clear()
+            _messageLog.value = emptyList()
+        }
+    }
 
     fun refreshChannels() {
         val count = _deviceInfo.value?.channelCount ?: 16
@@ -177,6 +271,19 @@ class RadioController @Inject constructor(
         val status = ReplyStatus.fromCode(body[0].toInt() and 0xFF)
         if (status != ReplyStatus.SUCCESS) {
             Log.w(TAG, "Command ${msg.command} replied with status $status")
+            // Emit user-visible error for write commands
+            val cmdLabel = when (msg.command) {
+                BasicCommand.WRITE_SETTINGS     -> "Settings"
+                BasicCommand.WRITE_BSS_SETTINGS -> "APRS/BSS settings"
+                BasicCommand.WRITE_RF_CH        -> "Channel"
+                BasicCommand.SET_VOLUME         -> "Volume"
+                BasicCommand.SET_IN_SCAN        -> "Scan"
+                BasicCommand.STORE_SETTINGS     -> "Save"
+                else -> null
+            }
+            if (cmdLabel != null) {
+                _errorEvent.tryEmit("$cmdLabel rejected: $status")
+            }
         }
         val payload = if (body.size > 1) body.copyOfRange(1, body.size) else ByteArray(0)
 
@@ -246,15 +353,17 @@ class RadioController @Inject constructor(
 
     private fun sendCmd(msg: BenshiMessage) {
         scope.launch {
-            try { transport.send(msg) }
-            catch (e: Exception) { Log.e(TAG, "Send failed", e) }
+            try {
+                withTimeoutOrNull(5_000L) { transport.send(msg) }
+                    ?: Log.w(TAG, "Send timed out for command ${msg.command}")
+            } catch (e: Exception) { Log.e(TAG, "Send failed", e) }
         }
     }
 
     private fun applySettings(settings: RadioSettings) {
-        if (settings.rawData.isNotEmpty()) {
-            sendCmd(BenshiMessage(CommandGroup.BASIC, BasicCommand.WRITE_SETTINGS, false, settings.rawData))
-        }
+        val data = settings.patchRawData()
+        sendCmd(RadioCommands.writeSettings(data))
+        sendCmd(RadioCommands.storeSettings())
     }
 
     private fun appendLog(msg: BenshiMessage) {
@@ -265,8 +374,11 @@ class RadioController @Inject constructor(
             bodyHex    = msg.body.toHexString(),
             bodyLen    = msg.body.size,
         )
-        val current = _messageLog.value
-        _messageLog.value = (listOf(entry) + current).take(200)
+        synchronized(logBuffer) {
+            logBuffer.addFirst(entry)
+            if (logBuffer.size > 200) logBuffer.removeLast()
+            _messageLog.value = logBuffer.toList()
+        }
     }
 }
 

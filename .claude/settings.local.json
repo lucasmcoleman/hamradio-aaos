@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//d//**)",
+      "Read(//e//**)",
+      "Read(//c/Users/Lucas/**)",
+      "Bash(echo \"sdk.dir=F\\\\:\\\\\\\\Android\\\\\\\\sdk\")",
+      "Bash(\"F:\\\\AndroidStudioProjects\\\\hamradio-aaos\\\\local.properties\")",
+      "Bash(./gradlew test:*)"
+    ]
+  }
+}

@@ -7,23 +7,29 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Map
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -42,14 +48,14 @@ import com.hamradio.aaos.vm.MainViewModel
 
 private sealed class Screen(val route: String, val label: String, val icon: ImageVector) {
     object Home     : Screen("home",     "Home",     Icons.Default.Home)
-    object Channels : Screen("channels", "Channels", Icons.Default.List)
-    object Settings : Screen("settings", "Settings", Icons.Default.Settings)
-    object Aprs     : Screen("aprs",     "APRS",     Icons.Default.Map)
+    object Channels : Screen("channels", "Channels", Icons.AutoMirrored.Filled.List)
+    object Settings : Screen("settings", "Settings", Icons.Default.Tune)
+    object Aprs     : Screen("aprs",     "APRS",     Icons.Default.LocationOn)
     object Debug    : Screen("debug",    "Debug",    Icons.Default.BugReport)
 }
 
 private val TOP_LEVEL = listOf(
-    Screen.Home, Screen.Channels, Screen.Settings, Screen.Aprs, Screen.Debug,
+    Screen.Home, Screen.Channels, Screen.Settings, Screen.Aprs,
 )
 
 @Composable
@@ -57,15 +63,24 @@ fun AppNavigation(vm: MainViewModel) {
     val navController = rememberNavController()
     val backEntry     by navController.currentBackStackEntryAsState()
     val currentRoute  = backEntry?.destination?.route
+    val snackbarHostState = remember { SnackbarHostState() }
+    val showDebug by vm.showDebugTab.collectAsStateWithLifecycle()
+
+    // Show error events as snackbars (H4)
+    LaunchedEffect(Unit) {
+        vm.errorEvent.collect { msg ->
+            snackbarHostState.showSnackbar(msg)
+        }
+    }
 
     Scaffold(
         containerColor = Background,
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             // AAOS-safe nav bar: tall touch targets, large icons
             NavigationBar(
                 containerColor = SurfaceCard,
                 tonalElevation = 0.dp,
-                modifier       = Modifier.height(72.dp),
             ) {
                 TOP_LEVEL.forEach { screen ->
                     val selected = currentRoute == screen.route
@@ -73,9 +88,8 @@ fun AppNavigation(vm: MainViewModel) {
                         selected = selected,
                         onClick  = {
                             navController.navigate(screen.route) {
-                                popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                                popUpTo(navController.graph.findStartDestination().id) { saveState = false }
                                 launchSingleTop = true
-                                restoreState    = true
                             }
                         },
                         icon  = {
@@ -107,11 +121,18 @@ fun AppNavigation(vm: MainViewModel) {
             ) {
                 composable(Screen.Home.route) {
                     HomeScreen(vm = vm, onNavigateToChannels = {
-                        navController.navigate(Screen.Channels.route)
+                        navController.navigate(Screen.Channels.route) {
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = false }
+                            launchSingleTop = true
+                        }
                     })
                 }
                 composable(Screen.Channels.route) { ChannelsScreen(vm) }
-                composable(Screen.Settings.route)  { SettingsScreen(vm) }
+                composable(Screen.Settings.route)  {
+                    SettingsScreen(vm, onOpenDebug = {
+                        navController.navigate(Screen.Debug.route)
+                    })
+                }
                 composable(Screen.Aprs.route)      { AprsScreen(vm) }
                 composable(Screen.Debug.route)     { DebugScreen(vm) }
             }

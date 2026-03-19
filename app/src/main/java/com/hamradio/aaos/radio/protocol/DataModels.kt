@@ -97,7 +97,7 @@ data class RfChannel(
 
     companion object {
         fun decode(bytes: ByteArray): RfChannel? {
-            if (bytes.size < 30) return null
+            if (bytes.size < 25) return null
             val channelId = bytes[0].toInt() and 0xFF
             val txMod = ModulationType.fromCode((bytes[1].toInt() shr 6) and 0x03)
             val txFreqRaw = getInt(bytes, 1) and 0x3FFFFFFF
@@ -200,9 +200,41 @@ data class RadioSettings(
     val vfo2ModFreqHz: Long = 446_000_000L,
     val rawData: ByteArray = ByteArray(0),
 ) {
+    fun patchRawData(): ByteArray {
+        val buf = if (rawData.size >= 20) rawData.copyOf() else ByteArray(20)
+        buf[0] = (((channelA and 0x0F) shl 4) or (channelB and 0x0F)).toByte()
+        buf[1] = ((buf[1].toInt() and 0x40) or
+                  (if (scan) 0x80 else 0) or
+                  ((doubleChannel and 0x03) shl 4) or
+                  (squelchLevel and 0x0F)).toByte()
+        buf[2] = ((if (tailElim) 0x80 else 0) or
+                  (if (autoRelayEn) 0x40 else 0) or
+                  (if (autoPowerOn) 0x20 else 0) or
+                  (if (keepAghfpLink) 0x10 else 0) or
+                  ((micGain and 0x07) shl 1) or
+                  (buf[2].toInt() and 0x01)).toByte()
+        buf[4] = (((localSpeaker and 0x03) shl 6) or
+                  ((btMicGain and 0x07) shl 3) or
+                  (if (adaptiveResponse) 0x04 else 0) or
+                  (if (disTone) 0x02 else 0) or
+                  (if (powerSavingMode) 0x01 else 0)).toByte()
+        buf[5] = (((autoPowerOff and 0x0F) shl 4) or (buf[5].toInt() and 0x0F)).toByte()
+        buf[6] = (((hmSpeaker and 0x03) shl 6) or
+                  ((positioningSystem and 0x0F) shl 2) or
+                  (buf[6].toInt() and 0x03)).toByte()
+        buf[7] = ((buf[7].toInt() and 0xFB.toInt()) or (if (pttLock) 0x04 else 0)).toByte()
+        buf[8] = (((screenTimeout and 0x1F) shl 3) or
+                  (buf[8].toInt() and 0x06) or
+                  (if (imperialUnit) 0x01 else 0)).toByte()
+        buf[9] = ((channelA and 0xF0) or ((channelB shr 4) and 0x0F)).toByte()
+        if (buf.size >= 16) putInt(buf, 12, (vfo1ModFreqHz / 100L).toInt())
+        if (buf.size >= 20) putInt(buf, 16, (vfo2ModFreqHz / 100L).toInt())
+        return buf
+    }
+
     companion object {
         fun decode(bytes: ByteArray): RadioSettings? {
-            if (bytes.size < 17) return null  // bytes[0] = reply_status, payload from [1]
+            if (bytes.size < 20) return null
             val d = bytes
             val chALower  = (d[0].toInt() and 0xF0) shr 4
             val chBLower  = d[0].toInt() and 0x0F
@@ -322,7 +354,33 @@ data class BssSettings(
     val beaconMessage: String = "",
     val aprsSymbol: String = "/>",
     val aprsCallsign: String = "",
+    val rawData: ByteArray = ByteArray(0),
 ) {
+    fun patchRawData(): ByteArray {
+        val buf = if (rawData.size >= 46) rawData.copyOf() else ByteArray(46)
+        buf[0] = (((maxFwdTimes and 0x0F) shl 4) or (timeToLive and 0x0F)).toByte()
+        buf[1] = ((if (pttReleaseSendLocation) 0x80 else 0) or
+                  (if (pttReleaseSendIdInfo) 0x40 else 0) or
+                  (if (pttReleaseSendBssUserId) 0x20 else 0) or
+                  (if (shouldShareLocation) 0x10 else 0) or
+                  (if (sendPwrVoltage) 0x08 else 0) or
+                  ((packetFormat and 0x01) shl 2) or
+                  (if (allowPositionCheck) 0x02 else 0) or
+                  (buf[1].toInt() and 0x01)).toByte()
+        buf[2] = (((aprsSsid and 0x0F) shl 4) or (buf[2].toInt() and 0x0F)).toByte()
+        buf[3] = (locationShareIntervalSec / 10).coerceIn(0, 255).toByte()
+        // bssUserIdLower: little-endian
+        buf[4] = (bssUserIdLower and 0xFF).toByte()
+        buf[5] = ((bssUserIdLower shr 8) and 0xFF).toByte()
+        buf[6] = ((bssUserIdLower shr 16) and 0xFF).toByte()
+        buf[7] = ((bssUserIdLower shr 24) and 0xFF).toByte()
+        pttReleaseIdInfo.padEnd(12, '\u0000').take(12).toByteArray(Charsets.US_ASCII).copyInto(buf, 8)
+        beaconMessage.padEnd(18, '\u0000').take(18).toByteArray(Charsets.US_ASCII).copyInto(buf, 20)
+        aprsSymbol.padEnd(2, '\u0000').take(2).toByteArray(Charsets.US_ASCII).copyInto(buf, 38)
+        aprsCallsign.padEnd(6, '\u0000').take(6).toByteArray(Charsets.US_ASCII).copyInto(buf, 40)
+        return buf
+    }
+
     companion object {
         fun decode(bytes: ByteArray): BssSettings? {
             if (bytes.size < 46) return null
@@ -351,6 +409,7 @@ data class BssSettings(
                 beaconMessage           = decodeAscii(bytes, 20, 18),
                 aprsSymbol              = decodeAscii(bytes, 38, 2),
                 aprsCallsign            = decodeAscii(bytes, 40, 6),
+                rawData                 = bytes.copyOf(),
             )
         }
     }

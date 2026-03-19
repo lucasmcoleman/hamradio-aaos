@@ -2,6 +2,7 @@ package com.hamradio.aaos.radio.transport
 
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Abstraction over the Bluetooth transport (BLE or RFCOMM mock).
@@ -16,7 +17,7 @@ interface IRadioTransport {
     val inboundMessages: Flow<BenshiMessage>
 
     /** Flow of connection state changes. */
-    val connectionState: Flow<ConnectionState>
+    val connectionState: StateFlow<ConnectionState>
 
     /** Attempt to connect to the radio. */
     suspend fun connect()
