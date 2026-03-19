@@ -61,7 +61,7 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun DebugScreen(vm: MainViewModel) {
+fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
     val log      by vm.messageLog.collectAsStateWithLifecycle()
     val devInfo  by vm.deviceInfo.collectAsStateWithLifecycle()
     val isMock   = vm.isMockMode
@@ -88,7 +88,15 @@ fun DebugScreen(vm: MainViewModel) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Message Log", style = MaterialTheme.typography.headlineSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(
+                        onClick = onClose,
+                        colors  = ButtonDefaults.outlinedButtonColors(contentColor = Accent),
+                        border  = androidx.compose.foundation.BorderStroke(1.dp, Accent.copy(alpha = 0.5f)),
+                        shape   = RoundedCornerShape(8.dp),
+                    ) { Text("← Back", style = MaterialTheme.typography.labelMedium) }
+                    Text("Message Log", style = MaterialTheme.typography.headlineSmall)
+                }
                 if (log.isNotEmpty()) {
                     OutlinedButton(
                         onClick = { vm.clearLog() },
