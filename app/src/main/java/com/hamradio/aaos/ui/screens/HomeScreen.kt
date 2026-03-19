@@ -229,8 +229,10 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
             }
 
             // PTT button
+            val pttToggleMode by vm.pttToggleMode.collectAsStateWithLifecycle()
             PttButton(
                 isTransmitting = htStatus.isInTx,
+                toggleMode     = pttToggleMode,
                 onPttDown      = { vm.pttDown() },
                 onPttUp        = { vm.pttUp() },
             )
@@ -908,6 +910,7 @@ private fun VfoEditorSheet(
 @Composable
 private fun PttButton(
     isTransmitting: Boolean,
+    toggleMode: Boolean = false,
     onPttDown: () -> Unit,
     onPttUp: () -> Unit,
 ) {
@@ -920,14 +923,24 @@ private fun PttButton(
             .height(52.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(bgColor)
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        onPttDown()
-                        tryAwaitRelease()
-                        onPttUp()
-                    },
-                )
+            .pointerInput(toggleMode) {
+                if (toggleMode) {
+                    // Tap on / tap off
+                    detectTapGestures(
+                        onTap = {
+                            if (isTransmitting) onPttUp() else onPttDown()
+                        },
+                    )
+                } else {
+                    // Momentary: hold to transmit
+                    detectTapGestures(
+                        onPress = {
+                            onPttDown()
+                            tryAwaitRelease()
+                            onPttUp()
+                        },
+                    )
+                }
             },
         contentAlignment = Alignment.Center,
     ) {

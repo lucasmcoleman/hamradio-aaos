@@ -52,6 +52,11 @@ class RadioPrefs @Inject constructor(
         get() = prefs.getBoolean(KEY_AUTO_SWITCH_RX, false)
         set(v) = prefs.edit().putBoolean(KEY_AUTO_SWITCH_RX, v).apply()
 
+    /** PTT mode: false=momentary (hold), true=toggle (tap on/tap off). Default: momentary. */
+    var pttToggleMode: Boolean
+        get() = prefs.getBoolean(KEY_PTT_TOGGLE, false)
+        set(v) = prefs.edit().putBoolean(KEY_PTT_TOGGLE, v).apply()
+
     companion object {
         private const val KEY_MOCK = "use_mock_radio"
         private const val KEY_ADDR = "device_address"
@@ -59,5 +64,6 @@ class RadioPrefs @Inject constructor(
         private const val KEY_TX_ROUTE = "tx_mic_route"
         private const val KEY_DEBUG_TAB = "show_debug_tab"
         private const val KEY_AUTO_SWITCH_RX = "auto_switch_on_rx"
+        private const val KEY_PTT_TOGGLE = "ptt_toggle_mode"
     }
 }

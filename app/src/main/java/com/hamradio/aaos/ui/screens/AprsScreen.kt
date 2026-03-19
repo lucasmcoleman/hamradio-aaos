@@ -90,6 +90,19 @@ fun AprsScreen(vm: MainViewModel) {
             Text("Waiting for radio…", style = MaterialTheme.typography.bodyLarge, color = OnSurfaceMuted)
         } else {
 
+        // Master APRS enable
+        val aprsEnabled = b.shouldShareLocation || b.pttReleaseSendLocation
+        AprsGroup("APRS Beaconing") {
+            ToggleRow("Enable APRS", aprsEnabled) { enabled ->
+                vm.updateBssSettings {
+                    it.copy(
+                        shouldShareLocation = enabled,
+                        pttReleaseSendLocation = enabled,
+                    )
+                }
+            }
+        }
+
         // Station identity
         AprsGroup("Station Identity") {
             EditableAprsRow("Callsign", b.aprsCallsign.ifBlank { "—" }) {
