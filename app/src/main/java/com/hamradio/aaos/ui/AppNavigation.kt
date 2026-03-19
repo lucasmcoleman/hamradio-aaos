@@ -53,7 +53,7 @@ private sealed class Screen(val route: String, val label: String, val icon: Imag
 }
 
 private val TOP_LEVEL = listOf(
-    Screen.Home, Screen.Channels, Screen.Settings, Screen.Aprs, Screen.Debug,
+    Screen.Home, Screen.Channels, Screen.Settings, Screen.Aprs,
 )
 
 @Composable
@@ -127,7 +127,11 @@ fun AppNavigation(vm: MainViewModel) {
                     })
                 }
                 composable(Screen.Channels.route) { ChannelsScreen(vm) }
-                composable(Screen.Settings.route)  { SettingsScreen(vm) }
+                composable(Screen.Settings.route)  {
+                    SettingsScreen(vm, onOpenDebug = {
+                        navController.navigate(Screen.Debug.route)
+                    })
+                }
                 composable(Screen.Aprs.route)      { AprsScreen(vm) }
                 composable(Screen.Debug.route)     { DebugScreen(vm) }
             }
