@@ -49,9 +49,6 @@ import com.hamradio.aaos.vm.MainViewModel
 
 @Composable
 fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
-    Text("Settings placeholder", color = androidx.compose.ui.graphics.Color.White)
-    return
-    @Suppress("UNREACHABLE_CODE")
     val settings by vm.settings.collectAsStateWithLifecycle()
     val rxRoute = 2
     val txRoute = 2
@@ -70,16 +67,14 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
     ) {
         Text("Settings", style = MaterialTheme.typography.headlineMedium)
 
-        if (settings == null) {
+        val s = settings
+        if (s == null) {
             Text(
                 "Waiting for radio…",
                 style = MaterialTheme.typography.bodyLarge,
                 color = OnSurfaceMuted,
             )
-            return@Column
-        }
-
-        val s = settings!!
+        } else {
 
         SettingsGroup("RF") {
             SettingRow("Squelch") {
@@ -193,6 +188,7 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
                 LevelSlider(value = s.btMicGain, max = 7, onValue = { v -> vm.updateSettings { it.copy(btMicGain = v) } })
             }
         }
+        } // else (settings != null)
 
         SettingsGroup("Developer") {
             SettingRow("Mock Radio") {

@@ -56,9 +56,6 @@ import com.hamradio.aaos.vm.MainViewModel
 
 @Composable
 fun AprsScreen(vm: MainViewModel) {
-    Text("APRS placeholder", color = androidx.compose.ui.graphics.Color.White)
-    return
-    @Suppress("UNREACHABLE_CODE")
     val bss by vm.bssSettings.collectAsStateWithLifecycle()
     val channels by vm.channels.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
@@ -88,12 +85,10 @@ fun AprsScreen(vm: MainViewModel) {
             )
         }
 
-        if (bss == null) {
+        val b = bss
+        if (b == null) {
             Text("Waiting for radio…", style = MaterialTheme.typography.bodyLarge, color = OnSurfaceMuted)
-            return@Column
-        }
-
-        val b = bss!!
+        } else {
 
         // Station identity
         AprsGroup("Station Identity") {
@@ -158,7 +153,7 @@ fun AprsScreen(vm: MainViewModel) {
                 }
             }
         }
-
+        } // else (bss != null)
     }
 
     // Edit dialog
