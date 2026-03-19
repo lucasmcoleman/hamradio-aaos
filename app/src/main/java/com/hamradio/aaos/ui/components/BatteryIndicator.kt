@@ -14,7 +14,7 @@ import androidx.compose.material.icons.filled.Battery4Bar
 import androidx.compose.material.icons.filled.Battery5Bar
 import androidx.compose.material.icons.filled.Battery6Bar
 import androidx.compose.material.icons.filled.BatteryFull
-import androidx.compose.material.icons.filled.BatteryUnknown
+import androidx.compose.material.icons.automirrored.filled.BatteryUnknown
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -50,13 +50,13 @@ fun BatteryIndicator(
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Icon(
             imageVector        = percent.batteryIcon(),
-            contentDescription = "Battery $percent%",
+            contentDescription = if (percent < 0) "Battery unknown" else "Battery $percent%",
             tint               = color,
         )
-        if (showText && percent >= 0) {
+        if (showText) {
             Spacer(Modifier.width(4.dp))
             Text(
-                text  = "$percent%",
+                text  = if (percent < 0) "..." else "$percent%",
                 style = MaterialTheme.typography.labelMedium,
                 color = color,
             )
@@ -65,7 +65,7 @@ fun BatteryIndicator(
 }
 
 private fun Int.batteryIcon(): ImageVector = when {
-    this < 0  -> Icons.Default.BatteryUnknown
+    this < 0  -> Icons.AutoMirrored.Filled.BatteryUnknown
     this < 5  -> Icons.Default.Battery0Bar
     this < 15 -> Icons.Default.Battery1Bar
     this < 30 -> Icons.Default.Battery2Bar

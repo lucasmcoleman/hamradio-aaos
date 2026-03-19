@@ -1,8 +1,11 @@
 package com.hamradio.aaos.di
 
 import android.content.Context
+import android.util.Log
 import com.hamradio.aaos.BuildConfig
 import com.hamradio.aaos.radio.transport.BleTransport
+import com.hamradio.aaos.radio.transport.ConnectionState
+import com.hamradio.aaos.radio.transport.DisconnectedTransport
 import com.hamradio.aaos.radio.transport.IRadioTransport
 import com.hamradio.aaos.radio.transport.MockTransport
 import dagger.Module
@@ -11,6 +14,8 @@ import dagger.hilt.InstallIn
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.components.SingletonComponent
 import javax.inject.Singleton
+
+private const val TAG = "RadioModule"
 
 @Module
 @InstallIn(SingletonComponent::class)
@@ -32,12 +37,13 @@ object RadioModule {
         return if (BuildConfig.MOCK_RADIO || prefs.useMockRadio) {
             MockTransport()
         } else {
-            // Device address is stored in prefs after scanning
-            val addr = prefs.deviceAddress ?: FALLBACK_MOCK_WHEN_NO_ADDRESS
-            if (addr == FALLBACK_MOCK_WHEN_NO_ADDRESS) MockTransport()
-            else BleTransport(context, addr)
+            val addr = prefs.deviceAddress
+            if (addr != null) {
+                BleTransport(context, addr)
+            } else {
+                Log.i(TAG, "No device address — staying disconnected until configured")
+                DisconnectedTransport()
+            }
         }
     }
-
-    private const val FALLBACK_MOCK_WHEN_NO_ADDRESS = "__mock__"
 }

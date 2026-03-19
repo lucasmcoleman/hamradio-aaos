@@ -1,7 +1,9 @@
 package com.hamradio.aaos.ui.components
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -9,10 +11,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SuggestionChip
 import androidx.compose.material3.SuggestionChipDefaults
@@ -28,6 +34,7 @@ import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.protocol.SubAudio
 import com.hamradio.aaos.ui.theme.Accent
 import com.hamradio.aaos.ui.theme.DmrColor
+import com.hamradio.aaos.ui.theme.OnSurfaceMuted
 import com.hamradio.aaos.ui.theme.Outline
 import com.hamradio.aaos.ui.theme.RxGreen
 import com.hamradio.aaos.ui.theme.SurfaceCard
@@ -40,15 +47,17 @@ import com.hamradio.aaos.ui.theme.TxRed
  * [isActiveA] / [isActiveB]: highlighted border + badge when this is the
  * currently selected Channel A or B.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ChannelCard(
-    channel:   RfChannel,
-    isActiveA: Boolean = false,
-    isActiveB: Boolean = false,
-    isRx:      Boolean = false,
-    isTx:      Boolean = false,
-    onClick:   (() -> Unit)? = null,
-    modifier:  Modifier = Modifier,
+    channel:       RfChannel,
+    isActiveA:     Boolean = false,
+    isActiveB:     Boolean = false,
+    isRx:          Boolean = false,
+    isTx:          Boolean = false,
+    onClick:       (() -> Unit)? = null,
+    onLongClick:   (() -> Unit)? = null,
+    modifier:      Modifier = Modifier,
 ) {
     val borderColor = when {
         isTx      -> TxRed
@@ -67,7 +76,14 @@ fun ChannelCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
+            .then(
+                if (onClick != null || onLongClick != null)
+                    Modifier.combinedClickable(
+                        onClick     = { onClick?.invoke() },
+                        onLongClick = { onLongClick?.invoke() },
+                    )
+                else Modifier
+            ),
         shape  = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = containerColor),
         border = BorderStroke(if (isActiveA || isRx || isTx) 2.dp else 1.dp, borderColor),
@@ -127,7 +143,15 @@ fun ChannelCard(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (channel.mute) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.VolumeOff,
+                            contentDescription = "Muted",
+                            tint = OnSurfaceMuted,
+                            modifier = Modifier.size(16.dp),
+                        )
+                    }
                     if (channel.rxMod == ModulationType.DMR) Chip("DMR", DmrColor)
                     if (channel.bandwidth == BandwidthType.NARROW) Chip("N", MaterialTheme.colorScheme.onSurfaceVariant)
                     if (channel.txDisable) Chip("RO", MaterialTheme.colorScheme.onSurfaceVariant)
@@ -135,9 +159,11 @@ fun ChannelCard(
                 val tone = channel.rxSubAudio
                 if (tone != SubAudio.None) {
                     Text(
-                        text  = tone.label(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text     = tone.label(),
+                        style    = MaterialTheme.typography.labelSmall,
+                        color    = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }

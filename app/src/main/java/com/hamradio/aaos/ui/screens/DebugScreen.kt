@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -45,6 +47,7 @@ import com.hamradio.aaos.radio.protocol.BasicCommand
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import com.hamradio.aaos.radio.protocol.CommandGroup
 import com.hamradio.aaos.radio.protocol.RadioCommands
+import com.hamradio.aaos.radio.transport.ConnectionState
 import com.hamradio.aaos.ui.theme.Accent
 import com.hamradio.aaos.ui.theme.Background
 import com.hamradio.aaos.ui.theme.OnSurfaceMuted
@@ -80,11 +83,23 @@ fun DebugScreen(vm: MainViewModel) {
                 .background(SurfaceCard)
                 .padding(12.dp),
         ) {
-            Text(
-                "Message Log",
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.padding(bottom = 8.dp),
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Message Log", style = MaterialTheme.typography.headlineSmall)
+                if (log.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = { vm.clearLog() },
+                        colors  = ButtonDefaults.outlinedButtonColors(contentColor = TxRed),
+                        border  = androidx.compose.foundation.BorderStroke(1.dp, TxRed.copy(alpha = 0.5f)),
+                        shape   = RoundedCornerShape(8.dp),
+                    ) {
+                        Text("Clear", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+            }
             if (log.isEmpty()) {
                 Text("No messages yet.", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceMuted)
             } else {
@@ -102,7 +117,8 @@ fun DebugScreen(vm: MainViewModel) {
         // ----------------------------------------------------------------
         Column(
             modifier = Modifier
-                .width(280.dp),
+                .width(280.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // Device info card
@@ -149,19 +165,27 @@ fun DebugScreen(vm: MainViewModel) {
             }
 
             // Transport badge
-            Box(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(8.dp))
                     .background(if (isMock) Accent.copy(0.15f) else RxGreen.copy(0.12f))
                     .padding(10.dp),
-                contentAlignment = Alignment.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
                     text  = if (isMock) "MOCK TRANSPORT" else "BLE TRANSPORT",
                     style = MaterialTheme.typography.labelLarge,
                     color = if (isMock) Accent else RxGreen,
                 )
+                if (!isMock) {
+                    val connState by vm.connectionState.collectAsStateWithLifecycle()
+                    Text(
+                        text  = connState.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = OnSurfaceMuted,
+                    )
+                }
             }
         }
     }
