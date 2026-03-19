@@ -79,6 +79,13 @@ class MainViewModel @Inject constructor(
         _autoSwitchOnRx.value = enabled
     }
 
+    private val _pttToggleMode = MutableStateFlow(prefs.pttToggleMode)
+    val pttToggleMode: StateFlow<Boolean> = _pttToggleMode.asStateFlow()
+    fun setPttToggleMode(enabled: Boolean) {
+        prefs.pttToggleMode = enabled
+        _pttToggleMode.value = enabled
+    }
+
     /** Apply RX audio routing to radio settings (localSpeaker based on route). */
     private fun applyAudioRouting() {
         val rxRoute = prefs.rxAudioRoute
