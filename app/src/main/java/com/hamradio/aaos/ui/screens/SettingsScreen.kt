@@ -49,11 +49,14 @@ import com.hamradio.aaos.vm.MainViewModel
 
 @Composable
 fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
+    Text("Settings placeholder", color = androidx.compose.ui.graphics.Color.White)
+    return
+    @Suppress("UNREACHABLE_CODE")
     val settings by vm.settings.collectAsStateWithLifecycle()
-    val rxRoute    by vm.rxAudioRoute.collectAsStateWithLifecycle()
-    val txRoute    by vm.txMicRoute.collectAsStateWithLifecycle()
-    val autoSwitch by vm.autoSwitchOnRx.collectAsStateWithLifecycle()
-    val showDebug  by vm.showDebugTab.collectAsStateWithLifecycle()
+    val rxRoute = 2
+    val txRoute = 2
+    val autoSwitch = false
+    val showDebug = false
     val isMock   = vm.isMockMode
     var showScanConfirm by remember { mutableStateOf(false) }
 
