@@ -5,6 +5,7 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.util.Log
+import com.hamradio.aaos.radio.protocol.AprsPacket
 import com.hamradio.aaos.radio.protocol.BasicCommand
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import com.hamradio.aaos.radio.protocol.BssSettings
@@ -14,6 +15,7 @@ import com.hamradio.aaos.radio.protocol.HtStatus
 import com.hamradio.aaos.radio.protocol.RadioCommands
 import com.hamradio.aaos.radio.protocol.RadioNotification
 import com.hamradio.aaos.radio.protocol.RadioSettings
+import com.hamradio.aaos.radio.protocol.TncDataFragment
 import com.hamradio.aaos.radio.protocol.ReplyStatus
 import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.transport.ConnectionState
@@ -80,6 +82,14 @@ class RadioController @Inject constructor(
     /** One-shot error events for UI snackbar display. */
     private val _errorEvent = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val errorEvent: kotlinx.coroutines.flow.Flow<String> = _errorEvent
+
+    /** Received APRS packets (newest first, capped at 50). */
+    private val _aprsPackets = MutableStateFlow<List<AprsPacket>>(emptyList())
+    val aprsPackets: StateFlow<List<AprsPacket>> = _aprsPackets.asStateFlow()
+
+    /** TNC fragment reassembly buffer. */
+    private val fragmentBuffer = java.io.ByteArrayOutputStream()
+    private var currentFragmentId = -1
 
     /** Debounce counters for settings writes — avoids flooding BLE on slider drags. */
     private val settingsWriteGen = AtomicInteger(0)
@@ -339,11 +349,54 @@ class RadioController @Inject constructor(
 
         when (notif) {
             RadioNotification.HT_STATUS_CHANGED    -> HtStatus.decode(data)?.let { _htStatus.value = it }
-            RadioNotification.HT_CH_CHANGED        -> HtStatus.decode(data)?.let { _htStatus.value = it }
+            RadioNotification.HT_CH_CHANGED        -> {
+                // Channel changed — re-read the channel and update status
+                RfChannel.decode(data)?.let { ch ->
+                    val list = _channels.value.toMutableList()
+                    val idx = list.indexOfFirst { it.channelId == ch.channelId }
+                    if (idx >= 0) list[idx] = ch else list.add(ch)
+                    list.sortBy { it.channelId }
+                    _channels.value = list
+                }
+                sendCmd(RadioCommands.getHtStatus())
+            }
             RadioNotification.HT_SETTINGS_CHANGED  -> sendCmd(RadioCommands.getSettings())
             RadioNotification.BSS_SETTINGS_CHANGED -> sendCmd(RadioCommands.getBssSettings())
             RadioNotification.RADIO_STATUS_CHANGED -> sendCmd(RadioCommands.getHtStatus())
+            RadioNotification.DATA_RXD             -> handleDataRxd(data)
             else -> Unit
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // APRS / TNC data reception
+    // -----------------------------------------------------------------------
+
+    private fun handleDataRxd(data: ByteArray) {
+        val fragment = TncDataFragment.decode(data) ?: return
+        // New fragment ID → reset buffer
+        if (fragment.fragmentId != currentFragmentId) {
+            fragmentBuffer.reset()
+            currentFragmentId = fragment.fragmentId
+        }
+        fragmentBuffer.write(fragment.payload)
+
+        if (fragment.isFinal) {
+            val assembled = fragmentBuffer.toByteArray()
+            fragmentBuffer.reset()
+            currentFragmentId = -1
+
+            // Try to decode as AX.25 / APRS
+            val packet = AprsPacket.decode(assembled)
+            if (packet != null) {
+                Log.i(TAG, "APRS: ${packet.source}-${packet.sourceSsid} → ${packet.info.take(60)}")
+                val list = _aprsPackets.value.toMutableList()
+                list.add(0, packet)
+                if (list.size > 50) list.removeAt(list.size - 1)
+                _aprsPackets.value = list
+            } else {
+                Log.d(TAG, "DATA_RXD: ${assembled.size} bytes, not valid AX.25")
+            }
         }
     }
 
