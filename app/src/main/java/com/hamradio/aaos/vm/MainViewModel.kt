@@ -44,6 +44,7 @@ class MainViewModel @Inject constructor(
     val batteryPercent:  StateFlow<Int>             = radio.batteryPercent
     val deviceInfo:      StateFlow<DeviceInfo?>     = radio.deviceInfo
     val messageLog:      StateFlow<List<LogEntry>>  = radio.messageLog
+    val aprsPackets:     StateFlow<List<com.hamradio.aaos.radio.protocol.AprsPacket>> = radio.aprsPackets
 
     /** True when mock transport is active. */
     val isMockMode: Boolean get() = prefs.useMockRadio

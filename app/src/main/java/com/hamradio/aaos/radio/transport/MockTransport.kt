@@ -201,7 +201,7 @@ class MockTransport(
     }
 
     private fun buildDefaultSettingsData(): ByteArray {
-        val body = ByteArray(21)
+        val body = ByteArray(22)  // 22 bytes: 20 data + 2 trailing padding required by radio
         body[0]  = ((currentChannelA and 0x0F) shl 4 or (currentChannelB and 0x0F)).toByte()
         body[1]  = ((if (isScanActive) 0x80 else 0) or 0x10 or 0x04).toByte()  // dual-watch=1, squelch=4
         body[4]  = ((2 shl 6) or (4 shl 3)).toByte()   // local spk=2, bt mic gain=4

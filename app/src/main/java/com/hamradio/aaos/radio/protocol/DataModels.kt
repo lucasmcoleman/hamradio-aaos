@@ -171,11 +171,17 @@ data class RfChannel(
 // Radio Settings
 // ---------------------------------------------------------------------------
 
+/**
+ * Radio settings — 22-byte wire format using bit-level packing.
+ * Fields cross byte boundaries so BitReader/BitWriter must be used.
+ * The trailing 2 bytes (padding) are required by the radio firmware.
+ */
 data class RadioSettings(
     val channelA: Int = 0,
     val channelB: Int = 1,
     val scan: Boolean = false,
-    val doubleChannel: Int = 1,       // 0=off 1=dual 2=triple
+    val aghfpCallMode: Boolean = false,
+    val doubleChannel: Int = 1,       // 0=off 1=single 2=dual
     val squelchLevel: Int = 4,
     val tailElim: Boolean = true,
     val autoRelayEn: Boolean = false,
@@ -190,80 +196,167 @@ data class RadioSettings(
     val disTone: Boolean = false,
     val powerSavingMode: Boolean = false,
     val autoPowerOff: Int = 0,
+    val autoShareLocCh: Int = 0,
     val hmSpeaker: Int = 0,
     val positioningSystem: Int = 0,   // 0=GPS 1=BDS 2=GPS+BDS
     val timeOffset: Int = 0,
+    val useFreqRange2: Boolean = false,
     val pttLock: Boolean = false,
+    val leadingSyncBitEn: Boolean = false,
+    val pairingAtPowerOn: Boolean = false,
     val screenTimeout: Int = 3,
+    val vfoX: Int = 0,
     val imperialUnit: Boolean = false,
+    val wxMode: Int = 0,
+    val noaaCh: Int = 0,
+    val vfo1TxPower: Int = 0,         // 0=high 1=med 2=low
+    val vfo2TxPower: Int = 0,
+    val disDigitalMute: Boolean = false,
+    val signalingEccEn: Boolean = false,
+    val chDataLock: Boolean = false,
     val vfo1ModFreqHz: Long = 144_390_000L,
     val vfo2ModFreqHz: Long = 446_000_000L,
     val rawData: ByteArray = ByteArray(0),
 ) {
+    /** Encode settings to 22-byte wire format using bit-level packing. */
     fun patchRawData(): ByteArray {
-        val buf = if (rawData.size >= 20) rawData.copyOf() else ByteArray(20)
-        buf[0] = (((channelA and 0x0F) shl 4) or (channelB and 0x0F)).toByte()
-        buf[1] = ((buf[1].toInt() and 0x40) or
-                  (if (scan) 0x80 else 0) or
-                  ((doubleChannel and 0x03) shl 4) or
-                  (squelchLevel and 0x0F)).toByte()
-        buf[2] = ((if (tailElim) 0x80 else 0) or
-                  (if (autoRelayEn) 0x40 else 0) or
-                  (if (autoPowerOn) 0x20 else 0) or
-                  (if (keepAghfpLink) 0x10 else 0) or
-                  ((micGain and 0x07) shl 1) or
-                  (buf[2].toInt() and 0x01)).toByte()
-        buf[4] = (((localSpeaker and 0x03) shl 6) or
-                  ((btMicGain and 0x07) shl 3) or
-                  (if (adaptiveResponse) 0x04 else 0) or
-                  (if (disTone) 0x02 else 0) or
-                  (if (powerSavingMode) 0x01 else 0)).toByte()
-        buf[5] = (((autoPowerOff and 0x0F) shl 4) or (buf[5].toInt() and 0x0F)).toByte()
-        buf[6] = (((hmSpeaker and 0x03) shl 6) or
-                  ((positioningSystem and 0x0F) shl 2) or
-                  (buf[6].toInt() and 0x03)).toByte()
-        buf[7] = ((buf[7].toInt() and 0xFB.toInt()) or (if (pttLock) 0x04 else 0)).toByte()
-        buf[8] = (((screenTimeout and 0x1F) shl 3) or
-                  (buf[8].toInt() and 0x06) or
-                  (if (imperialUnit) 0x01 else 0)).toByte()
-        buf[9] = ((channelA and 0xF0) or ((channelB shr 4) and 0x0F)).toByte()
-        if (buf.size >= 16) putInt(buf, 12, (vfo1ModFreqHz / 100L).toInt())
-        if (buf.size >= 20) putInt(buf, 16, (vfo2ModFreqHz / 100L).toInt())
+        val buf = ByteArray(22)
+        val w = BitWriter(buf)
+        w.writeBits(channelA and 0x0F, 4)           // channelA lower
+        w.writeBits(channelB and 0x0F, 4)           // channelB lower
+        w.writeBool(scan)
+        w.writeBool(aghfpCallMode)
+        w.writeBits(doubleChannel, 2)
+        w.writeBits(squelchLevel, 4)
+        w.writeBool(tailElim)
+        w.writeBool(autoRelayEn)
+        w.writeBool(autoPowerOn)
+        w.writeBool(keepAghfpLink)
+        w.writeBits(micGain, 3)
+        w.writeBits(txHoldTime, 4)
+        w.writeBits(txTimeLimit, 5)
+        w.writeBits(localSpeaker, 2)
+        w.writeBits(btMicGain, 3)
+        w.writeBool(adaptiveResponse)
+        w.writeBool(disTone)
+        w.writeBool(powerSavingMode)
+        w.writeBits(autoPowerOff, 3)
+        w.writeBits(autoShareLocCh, 5)
+        w.writeBits(hmSpeaker, 2)
+        w.writeBits(positioningSystem, 4)
+        w.writeBits(timeOffset, 6)
+        w.writeBool(useFreqRange2)
+        w.writeBool(pttLock)
+        w.writeBool(leadingSyncBitEn)
+        w.writeBool(pairingAtPowerOn)
+        w.writeBits(screenTimeout, 5)
+        w.writeBits(vfoX, 2)
+        w.writeBool(imperialUnit)
+        w.writeBits(channelA shr 4, 4)              // channelA upper
+        w.writeBits((channelB shr 4) and 0x0F, 4)   // channelB upper
+        w.writeBits(wxMode, 2)
+        w.writeBits(noaaCh, 4)
+        w.writeBits(vfo1TxPower, 2)
+        w.writeBits(vfo2TxPower, 2)
+        w.writeBool(disDigitalMute)
+        w.writeBool(signalingEccEn)
+        w.writeBool(chDataLock)
+        w.writeBits(0, 3)                           // padding
+        // VFO frequencies (32 bits each, big-endian, freq / 100)
+        putInt(buf, 12, (vfo1ModFreqHz / 100L).toInt())
+        putInt(buf, 16, (vfo2ModFreqHz / 100L).toInt())
+        // bytes 20-21: trailing padding required by radio firmware
         return buf
     }
 
     companion object {
+        /** Wire size including the 2-byte trailing padding. */
+        const val WIRE_SIZE = 22
+
         fun decode(bytes: ByteArray): RadioSettings? {
             if (bytes.size < 20) return null
-            val d = bytes
-            val chALower  = (d[0].toInt() and 0xF0) shr 4
-            val chBLower  = d[0].toInt() and 0x0F
-            val chAUpper  = (d[9].toInt() and 0xF0)
-            val chBUpper  = ((d[9].toInt() and 0x0F) shl 4)
+            val r = BitReader(bytes)
+            val chALower = r.readBits(4)
+            val chBLower = r.readBits(4)
+            val scan = r.readBool()
+            val aghfpCallMode = r.readBool()
+            val doubleChannel = r.readBits(2)
+            val squelchLevel = r.readBits(4)
+            val tailElim = r.readBool()
+            val autoRelayEn = r.readBool()
+            val autoPowerOn = r.readBool()
+            val keepAghfpLink = r.readBool()
+            val micGain = r.readBits(3)
+            val txHoldTime = r.readBits(4)
+            val txTimeLimit = r.readBits(5)
+            val localSpeaker = r.readBits(2)
+            val btMicGain = r.readBits(3)
+            val adaptiveResponse = r.readBool()
+            val disTone = r.readBool()
+            val powerSavingMode = r.readBool()
+            val autoPowerOff = r.readBits(3)
+            val autoShareLocCh = r.readBits(5)
+            val hmSpeaker = r.readBits(2)
+            val positioningSystem = r.readBits(4)
+            val timeOffset = r.readBits(6)
+            val useFreqRange2 = r.readBool()
+            val pttLock = r.readBool()
+            val leadingSyncBitEn = r.readBool()
+            val pairingAtPowerOn = r.readBool()
+            val screenTimeout = r.readBits(5)
+            val vfoX = r.readBits(2)
+            val imperialUnit = r.readBool()
+            val chAUpper = r.readBits(4)
+            val chBUpper = r.readBits(4)
+            val wxMode = r.readBits(2)
+            val noaaCh = r.readBits(4)
+            val vfo1TxPower = r.readBits(2)
+            val vfo2TxPower = r.readBits(2)
+            val disDigitalMute = r.readBool()
+            val signalingEccEn = r.readBool()
+            val chDataLock = r.readBool()
+            r.readBits(3) // padding
+
             return RadioSettings(
-                channelA         = chAUpper or chALower,
-                channelB         = chBUpper or chBLower,
-                scan             = (d[1].toInt() and 0x80) != 0,
-                doubleChannel    = (d[1].toInt() shr 4) and 0x03,
-                squelchLevel     = d[1].toInt() and 0x0F,
-                tailElim         = (d[2].toInt() and 0x80) != 0,
-                autoRelayEn      = (d[2].toInt() and 0x40) != 0,
-                autoPowerOn      = (d[2].toInt() and 0x20) != 0,
-                keepAghfpLink    = (d[2].toInt() and 0x10) != 0,
-                micGain          = (d[2].toInt() shr 1) and 0x07,
-                localSpeaker     = (d[4].toInt() shr 6) and 0x03,
-                btMicGain        = (d[4].toInt() shr 3) and 0x07,
-                adaptiveResponse = (d[4].toInt() and 0x04) != 0,
-                disTone          = (d[4].toInt() and 0x02) != 0,
-                powerSavingMode  = (d[4].toInt() and 0x01) != 0,
-                autoPowerOff     = (d[5].toInt() shr 4) and 0x0F,
-                hmSpeaker        = (d[6].toInt() shr 6) and 0x03,
-                positioningSystem= (d[6].toInt() shr 2) and 0x0F,
-                pttLock          = (d[7].toInt() and 0x04) != 0,
-                screenTimeout    = (d[8].toInt() shr 3) and 0x1F,
-                imperialUnit     = (d[8].toInt() and 0x01) != 0,
-                vfo1ModFreqHz    = getInt(d, 12).toLong() * 100L,
-                vfo2ModFreqHz    = getInt(d, 16).toLong() * 100L,
+                channelA         = (chAUpper shl 4) or chALower,
+                channelB         = (chBUpper shl 4) or chBLower,
+                scan             = scan,
+                aghfpCallMode    = aghfpCallMode,
+                doubleChannel    = doubleChannel,
+                squelchLevel     = squelchLevel,
+                tailElim         = tailElim,
+                autoRelayEn      = autoRelayEn,
+                autoPowerOn      = autoPowerOn,
+                keepAghfpLink    = keepAghfpLink,
+                micGain          = micGain,
+                txHoldTime       = txHoldTime,
+                txTimeLimit      = txTimeLimit,
+                localSpeaker     = localSpeaker,
+                btMicGain        = btMicGain,
+                adaptiveResponse = adaptiveResponse,
+                disTone          = disTone,
+                powerSavingMode  = powerSavingMode,
+                autoPowerOff     = autoPowerOff,
+                autoShareLocCh   = autoShareLocCh,
+                hmSpeaker        = hmSpeaker,
+                positioningSystem= positioningSystem,
+                timeOffset       = timeOffset,
+                useFreqRange2    = useFreqRange2,
+                pttLock          = pttLock,
+                leadingSyncBitEn = leadingSyncBitEn,
+                pairingAtPowerOn = pairingAtPowerOn,
+                screenTimeout    = screenTimeout,
+                vfoX             = vfoX,
+                imperialUnit     = imperialUnit,
+                wxMode           = wxMode,
+                noaaCh           = noaaCh,
+                vfo1TxPower      = vfo1TxPower,
+                vfo2TxPower      = vfo2TxPower,
+                disDigitalMute   = disDigitalMute,
+                signalingEccEn   = signalingEccEn,
+                chDataLock       = chDataLock,
+                vfo1ModFreqHz    = if (bytes.size >= 16) getInt(bytes, 12).toLong() * 100L else 144_390_000L,
+                vfo2ModFreqHz    = if (bytes.size >= 20) getInt(bytes, 16).toLong() * 100L else 446_000_000L,
                 rawData          = bytes.copyOf(),
             )
         }
@@ -454,6 +547,181 @@ data class DeviceInfo(
                 channelCount      = bytes[8].toInt() and 0xFF,
                 freqRangeCount    = (bytes[9].toInt() and 0xF0) shr 4,
             )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bit-level reader/writer — for fields that cross byte boundaries
+// ---------------------------------------------------------------------------
+
+/** Reads fields of arbitrary bit width from a byte array. */
+class BitReader(private val data: ByteArray) {
+    var bitPos: Int = 0
+
+    fun readBits(count: Int): Int {
+        var result = 0
+        for (i in 0 until count) {
+            val byteIdx = bitPos / 8
+            val bitIdx = 7 - (bitPos % 8)
+            if (byteIdx < data.size) {
+                result = (result shl 1) or ((data[byteIdx].toInt() shr bitIdx) and 1)
+            } else {
+                result = result shl 1
+            }
+            bitPos++
+        }
+        return result
+    }
+
+    fun readBool(): Boolean = readBits(1) != 0
+}
+
+/** Writes fields of arbitrary bit width into a byte array. */
+class BitWriter(private val data: ByteArray) {
+    var bitPos: Int = 0
+
+    fun writeBits(value: Int, count: Int) {
+        for (i in count - 1 downTo 0) {
+            val bit = (value shr i) and 1
+            val byteIdx = bitPos / 8
+            val bitIdx = 7 - (bitPos % 8)
+            if (byteIdx < data.size) {
+                if (bit == 1) data[byteIdx] = (data[byteIdx].toInt() or (1 shl bitIdx)).toByte()
+                else data[byteIdx] = (data[byteIdx].toInt() and (1 shl bitIdx).inv()).toByte()
+            }
+            bitPos++
+        }
+    }
+
+    fun writeBool(value: Boolean) = writeBits(if (value) 1 else 0, 1)
+}
+
+// ---------------------------------------------------------------------------
+// TNC Data Fragment — for APRS/BSS packet reception
+// ---------------------------------------------------------------------------
+
+data class TncDataFragment(
+    val isFinal: Boolean,
+    val withChannelId: Boolean,
+    val fragmentId: Int,
+    val payload: ByteArray,
+    val channelId: Int?,
+) {
+    companion object {
+        fun decode(data: ByteArray): TncDataFragment? {
+            if (data.isEmpty()) return null
+            val header = data[0].toInt() and 0xFF
+            val isFinal = (header and 0x80) != 0
+            val withCh = (header and 0x40) != 0
+            val fragId = header and 0x3F
+            val payloadEnd = if (withCh) data.size - 1 else data.size
+            val payload = if (data.size > 1) data.copyOfRange(1, payloadEnd) else ByteArray(0)
+            val chId = if (withCh && data.size > 1) data.last().toInt() and 0xFF else null
+            return TncDataFragment(isFinal, withCh, fragId, payload, chId)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AX.25 / APRS packet
+// ---------------------------------------------------------------------------
+
+data class AprsPacket(
+    val source: String,
+    val sourceSsid: Int,
+    val destination: String,
+    val destinationSsid: Int,
+    val digipeaters: List<String>,
+    val info: String,
+    val latitude: Double?,
+    val longitude: Double?,
+) {
+    companion object {
+        /** Decode a raw AX.25 frame (after TNC fragment reassembly). */
+        fun decode(raw: ByteArray): AprsPacket? {
+            if (raw.size < 16) return null  // minimum: 7+7 address + control + pid + 1 byte info
+
+            // AX.25 addresses: 7 bytes each, callsign chars are shifted left 1 bit
+            fun decodeCallsign(data: ByteArray, offset: Int): Pair<String, Int> {
+                val call = (0 until 6).map { i ->
+                    ((data[offset + i].toInt() and 0xFF) shr 1).toChar()
+                }.joinToString("").trimEnd()
+                val ssid = (data[offset + 6].toInt() shr 1) and 0x0F
+                return call to ssid
+            }
+
+            val (dest, destSsid) = decodeCallsign(raw, 0)
+            val (src, srcSsid) = decodeCallsign(raw, 7)
+
+            // Check for digipeaters (address extension bit)
+            val digis = mutableListOf<String>()
+            var addrEnd = 14
+            if ((raw[13].toInt() and 0x01) == 0) {
+                // More address fields follow
+                while (addrEnd + 7 <= raw.size) {
+                    val (digi, digiSsid) = decodeCallsign(raw, addrEnd)
+                    digis.add(if (digiSsid > 0) "$digi-$digiSsid" else digi)
+                    val isLast = (raw[addrEnd + 6].toInt() and 0x01) != 0
+                    addrEnd += 7
+                    if (isLast) break
+                }
+            }
+
+            // Control (0x03 = UI frame) + PID (0xF0 = no layer 3)
+            if (addrEnd + 2 > raw.size) return null
+            val infoStart = addrEnd + 2
+            if (infoStart > raw.size) return null
+            val info = raw.copyOfRange(infoStart, raw.size)
+                .map { it.toInt().and(0xFF).toChar() }
+                .joinToString("")
+
+            // Parse APRS position from info field
+            val (lat, lon) = parseAprsPosition(info)
+
+            return AprsPacket(
+                source = src,
+                sourceSsid = srcSsid,
+                destination = dest,
+                destinationSsid = destSsid,
+                digipeaters = digis,
+                info = info,
+                latitude = lat,
+                longitude = lon,
+            )
+        }
+
+        /** Parse lat/lon from APRS info field (uncompressed positions). */
+        private fun parseAprsPosition(info: String): Pair<Double?, Double?> {
+            if (info.isEmpty()) return null to null
+            val dataType = info[0]
+            // Uncompressed position: !, =, /, @ followed by DDmm.mmN/DDDmm.mmW
+            if (dataType in listOf('!', '=', '/', '@') && info.length >= 20) {
+                val posStr = if (dataType in listOf('/', '@')) info.substring(8) else info.substring(1)
+                if (posStr.length < 19) return null to null
+                val lat = parseAprsLat(posStr.substring(0, 8))
+                val lon = parseAprsLon(posStr.substring(9, 18))
+                return lat to lon
+            }
+            return null to null
+        }
+
+        private fun parseAprsLat(s: String): Double? {
+            if (s.length < 8) return null
+            val deg = s.substring(0, 2).toDoubleOrNull() ?: return null
+            val min = s.substring(2, 7).toDoubleOrNull() ?: return null
+            val dir = s[7]
+            val result = deg + min / 60.0
+            return if (dir == 'S') -result else result
+        }
+
+        private fun parseAprsLon(s: String): Double? {
+            if (s.length < 9) return null
+            val deg = s.substring(0, 3).toDoubleOrNull() ?: return null
+            val min = s.substring(3, 8).toDoubleOrNull() ?: return null
+            val dir = s[8]
+            val result = deg + min / 60.0
+            return if (dir == 'W') -result else result
         }
     }
 }
