@@ -1,11 +1,15 @@
 *.iml
-.gradle
-/local.properties
-/.idea
+.gradle/
+.idea/
 .DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
 local.properties
 keystore.properties
+
+# Build outputs
+build/
+app/build/
+*.apk
+*.aab
+
+# Gradle wrapper (large jar)
+gradle/wrapper/gradle-wrapper.jar
