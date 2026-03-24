@@ -3,11 +3,10 @@ package com.hamradio.aaos.di
 import android.content.Context
 import android.util.Log
 import com.hamradio.aaos.BuildConfig
-import com.hamradio.aaos.radio.transport.BleTransport
-import com.hamradio.aaos.radio.transport.ConnectionState
 import com.hamradio.aaos.radio.transport.DisconnectedTransport
 import com.hamradio.aaos.radio.transport.IRadioTransport
 import com.hamradio.aaos.radio.transport.MockTransport
+import com.hamradio.aaos.radio.transport.RfcommTransport
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -39,7 +38,8 @@ object RadioModule {
         } else {
             val addr = prefs.deviceAddress
             if (addr != null) {
-                BleTransport(context, addr)
+                Log.i(TAG, "Connecting via RFCOMM to $addr")
+                RfcommTransport(context, addr)
             } else {
                 Log.i(TAG, "No device address — staying disconnected until configured")
                 DisconnectedTransport()

@@ -1170,10 +1170,7 @@ private fun ConnectionSheet(
                                     .background(SurfaceElevated)
                                     .clickable {
                                         scanner.stopScan()
-                                        vm.setDeviceAddress(device.address)
-                                        vm.disconnect()
-                                        vm.connect()
-                                        onDismiss()
+                                        vm.connectToDevice(device.address)
                                     }
                                     .padding(horizontal = 12.dp, vertical = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -1183,7 +1180,12 @@ private fun ConnectionSheet(
                                     Text(device.name, style = MaterialTheme.typography.bodyMedium)
                                     Text(device.address, style = MaterialTheme.typography.labelSmall, color = OnSurfaceMuted)
                                 }
-                                Text("${device.rssi} dBm", style = MaterialTheme.typography.labelSmall, color = OnSurfaceMuted)
+                                Column(horizontalAlignment = Alignment.End) {
+                                    Text(device.type, style = MaterialTheme.typography.labelSmall, color = Accent)
+                                    if (device.rssi != 0) {
+                                        Text("${device.rssi} dBm", style = MaterialTheme.typography.labelSmall, color = OnSurfaceMuted)
+                                    }
+                                }
                             }
                         }
                     }
@@ -1215,10 +1217,7 @@ private fun ConnectionSheet(
                     FilledTonalButton(
                         onClick = {
                             if (addressText.isNotBlank()) {
-                                vm.setDeviceAddress(addressText.trim())
-                                vm.disconnect()
-                                vm.connect()
-                                onDismiss()
+                                vm.connectToDevice(addressText.trim())
                             }
                         },
                         colors = ButtonDefaults.filledTonalButtonColors(
