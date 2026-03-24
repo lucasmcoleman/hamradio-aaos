@@ -189,7 +189,7 @@ private fun Chip(text: String, color: androidx.compose.ui.graphics.Color) {
     )
 }
 
-private fun Double.formatFreq(): String = "%.4f".format(this)
+private fun Double.formatFreq(): String = "%.3f".format(this)
 
 private fun SubAudio.label(): String = when (this) {
     is SubAudio.None   -> ""

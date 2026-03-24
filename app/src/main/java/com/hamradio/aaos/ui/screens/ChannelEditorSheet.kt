@@ -76,8 +76,8 @@ fun ChannelEditorSheet(
 ) {
     // Mutable edit state initialized from channel
     var name by remember { mutableStateOf(channel.name) }
-    var txFreq by remember { mutableStateOf("%.4f".format(channel.txFreqMhz)) }
-    var rxFreq by remember { mutableStateOf("%.4f".format(channel.rxFreqMhz)) }
+    var txFreq by remember { mutableStateOf("%.3f".format(channel.txFreqMhz)) }
+    var rxFreq by remember { mutableStateOf("%.3f".format(channel.rxFreqMhz)) }
     // 0=High(50W), 1=Medium(25W), 2=Low(8W)
     var powerLevel by remember { mutableStateOf(
         when { channel.txAtMaxPower -> 0; channel.txAtMedPower -> 1; else -> 2 }

@@ -77,8 +77,8 @@ fun ChannelsScreen(vm: MainViewModel) {
         if (query.isBlank()) channels
         else channels.filter {
             it.name.contains(query, ignoreCase = true) ||
-            "%.4f".format(it.txFreqMhz).contains(query) ||
-            "%.4f".format(it.rxFreqMhz).contains(query)
+            "%.3f".format(it.txFreqMhz).contains(query) ||
+            "%.3f".format(it.rxFreqMhz).contains(query)
         }
     }
 
