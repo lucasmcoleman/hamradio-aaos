@@ -240,7 +240,7 @@ class MainViewModel @Inject constructor(
 
     /** Toggle between mock and real BLE transport (requires reconnect). */
     /** Signals the Activity to recreate itself so Hilt re-injects the transport. */
-    private val _restartEvent = MutableSharedFlow<Unit>()
+    private val _restartEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val restartEvent: kotlinx.coroutines.flow.Flow<Unit> = _restartEvent
 
     fun toggleMockMode() {
@@ -258,7 +258,7 @@ class MainViewModel @Inject constructor(
         radio.disconnect()
         prefs.deviceAddress = address
         prefs.useMockRadio = false
-        viewModelScope.launch { _restartEvent.emit(Unit) }
+        _restartEvent.tryEmit(Unit)
     }
 
     override fun onCleared() {

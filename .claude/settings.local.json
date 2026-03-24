@@ -16,7 +16,8 @@
       "Bash(./gradlew publishReleaseBundle --stacktrace)",
       "Bash(grep -v \"^$\")",
       "Bash(./gradlew publishReleaseBundle --info)",
-      "Bash(./gradlew clean:*)"
+      "Bash(./gradlew clean:*)",
+      "Bash(cd:*)"
     ]
   }
 }
