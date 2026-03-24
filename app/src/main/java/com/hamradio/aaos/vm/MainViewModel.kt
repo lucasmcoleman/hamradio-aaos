@@ -253,6 +253,14 @@ class MainViewModel @Inject constructor(
         prefs.deviceAddress = address
     }
 
+    /** Set device address and restart to reinject transport with new address. */
+    fun connectToDevice(address: String) {
+        radio.disconnect()
+        prefs.deviceAddress = address
+        prefs.useMockRadio = false
+        viewModelScope.launch { _restartEvent.emit(Unit) }
+    }
+
     override fun onCleared() {
         super.onCleared()
         radio.disconnect()
