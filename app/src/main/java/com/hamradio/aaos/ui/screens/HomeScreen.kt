@@ -51,6 +51,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -1116,6 +1117,28 @@ private fun ConnectionSheet(
                 val scannedDevices by scanner.devices.collectAsStateWithLifecycle()
                 val isScanning by scanner.isScanning.collectAsStateWithLifecycle()
 
+                // Runtime BLE permission request (required on Android 12+)
+                val permissionLauncher = rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.RequestMultiplePermissions()
+                ) { grants ->
+                    if (grants.values.all { it }) scanner.startScan()
+                }
+                val blePermissions = remember {
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
+                        arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+                    else
+                        arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
+                }
+
+                fun startScanWithPermission() {
+                    val allGranted = blePermissions.all {
+                        androidx.core.content.ContextCompat.checkSelfPermission(context, it) ==
+                            android.content.pm.PackageManager.PERMISSION_GRANTED
+                    }
+                    if (allGranted) scanner.startScan()
+                    else permissionLauncher.launch(blePermissions)
+                }
+
                 // Stop scan when sheet closes
                 DisposableEffect(Unit) { onDispose { scanner.stopScan() } }
 
@@ -1126,7 +1149,7 @@ private fun ConnectionSheet(
                 ) {
                     Text("Nearby Devices", style = MaterialTheme.typography.labelLarge, color = OnSurfaceMuted)
                     FilledTonalButton(
-                        onClick = { if (isScanning) scanner.stopScan() else scanner.startScan() },
+                        onClick = { if (isScanning) scanner.stopScan() else startScanWithPermission() },
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = Accent.copy(alpha = 0.2f),
                             contentColor = Accent,

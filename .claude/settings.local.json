@@ -6,7 +6,9 @@
       "Read(//c/Users/Lucas/**)",
       "Bash(echo \"sdk.dir=F\\\\:\\\\\\\\Android\\\\\\\\sdk\")",
       "Bash(\"F:\\\\AndroidStudioProjects\\\\hamradio-aaos\\\\local.properties\")",
-      "Bash(./gradlew test:*)"
+      "Bash(./gradlew test:*)",
+      "Bash(./gradlew assembleDebug)",
+      "Bash(./gradlew assembleDebug assembleRelease bundleRelease)"
     ]
   }
 }
