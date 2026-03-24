@@ -206,8 +206,8 @@ class MockTransport(
         body[1]  = ((if (isScanActive) 0x80 else 0) or 0x10 or 0x04).toByte()  // dual-watch=1, squelch=4
         body[4]  = ((2 shl 6) or (4 shl 3)).toByte()   // local spk=2, bt mic gain=4
         body[9]  = ((currentChannelA and 0xF0) or ((currentChannelB and 0xF0) shr 4)).toByte()
-        putInt(body, 12, (144_390_000L / 100L).toInt())  // VFO1 = 144.390
-        putInt(body, 16, (446_000_000L / 100L).toInt())  // VFO2 = 446.000
+        putInt(body, 12, 144_390_000)  // VFO1 = 144.390 MHz
+        putInt(body, 16, 446_000_000)  // VFO2 = 446.000 MHz
         return body
     }
 

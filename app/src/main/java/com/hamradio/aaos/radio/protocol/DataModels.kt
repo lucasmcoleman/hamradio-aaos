@@ -114,8 +114,8 @@ data class RfChannel(
             return RfChannel(
                 channelId   = channelId,
                 name        = name,
-                txFreqHz    = txFreqRaw * 100L,
-                rxFreqHz    = rxFreqRaw * 100L,
+                txFreqHz    = txFreqRaw.toLong(),
+                rxFreqHz    = rxFreqRaw.toLong(),
                 txMod       = txMod,
                 rxMod       = rxMod,
                 txSubAudio  = txSubAudio,
@@ -138,8 +138,8 @@ data class RfChannel(
         fun encode(ch: RfChannel): ByteArray {
             val buf = ByteArray(25)
             buf[0] = ch.channelId.toByte()
-            val txFreqRaw = (ch.txFreqHz / 100L).toInt()
-            val rxFreqRaw = (ch.rxFreqHz / 100L).toInt()
+            val txFreqRaw = ch.txFreqHz.toInt()
+            val rxFreqRaw = ch.rxFreqHz.toInt()
             putInt(buf, 1, (ch.txMod.code shl 30) or (txFreqRaw and 0x3FFFFFFF))
             putInt(buf, 5, (ch.rxMod.code shl 30) or (rxFreqRaw and 0x3FFFFFFF))
             putShort(buf, 9,  ch.txSubAudio.toRaw())
@@ -262,9 +262,9 @@ data class RadioSettings(
         w.writeBool(signalingEccEn)
         w.writeBool(chDataLock)
         w.writeBits(0, 3)                           // padding
-        // VFO frequencies (32 bits each, big-endian, freq / 100)
-        putInt(buf, 12, (vfo1ModFreqHz / 100L).toInt())
-        putInt(buf, 16, (vfo2ModFreqHz / 100L).toInt())
+        // VFO frequencies (32 bits each, big-endian, stored as Hz)
+        putInt(buf, 12, vfo1ModFreqHz.toInt())
+        putInt(buf, 16, vfo2ModFreqHz.toInt())
         // bytes 20-21: trailing padding required by radio firmware
         return buf
     }
@@ -355,8 +355,8 @@ data class RadioSettings(
                 disDigitalMute   = disDigitalMute,
                 signalingEccEn   = signalingEccEn,
                 chDataLock       = chDataLock,
-                vfo1ModFreqHz    = if (bytes.size >= 16) getInt(bytes, 12).toLong() * 100L else 144_390_000L,
-                vfo2ModFreqHz    = if (bytes.size >= 20) getInt(bytes, 16).toLong() * 100L else 446_000_000L,
+                vfo1ModFreqHz    = if (bytes.size >= 16) getInt(bytes, 12).toLong() else 144_390_000L,
+                vfo2ModFreqHz    = if (bytes.size >= 20) getInt(bytes, 16).toLong() else 446_000_000L,
                 rawData          = bytes.copyOf(),
             )
         }

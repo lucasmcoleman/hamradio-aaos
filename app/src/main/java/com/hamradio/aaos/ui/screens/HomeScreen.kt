@@ -484,7 +484,7 @@ private fun FreqText(label: String, mhz: Double, active: Boolean, onTap: () -> U
                     else OnSurfaceMuted,
         )
         Text(
-            text  = "%.4f".format(mhz),
+            text  = "%.3f".format(mhz),
             style = MaterialTheme.typography.displaySmall,
             color = if (active && label == "TX") TxRed
                     else if (active && label == "RX") RxGreen
@@ -606,7 +606,7 @@ private fun VfoDisplay(
                     // Show TX freq during transmit (if offset), otherwise RX freq
                     val displayFreqHz = if (isTx && isPrimary && vfo.offsetHz != 0L) vfo.txFreqHz else vfo.rxFreqHz
                     Text(
-                        text  = "%.4f".format(displayFreqHz / 1_000_000.0),
+                        text  = "%.3f".format(displayFreqHz / 1_000_000.0),
                         style = MaterialTheme.typography.displaySmall,
                         color = if (isTx && isPrimary) TxRed else if (isRx && isPrimary) RxGreen else MaterialTheme.colorScheme.onSurface,
                     )
@@ -666,9 +666,9 @@ private fun VfoEditorSheet(
     onSaveAsChannel: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    var freqText by remember(vfo.freqHz) { mutableStateOf("%.4f".format(vfo.freqMhz)) }
+    var freqText by remember(vfo.freqHz) { mutableStateOf("%.3f".format(vfo.freqMhz)) }
     var offsetText by remember(vfo.offsetHz) { mutableStateOf(
-        if (vfo.offsetHz == 0L) "" else "%.4f".format(vfo.offsetHz / 1_000_000.0)
+        if (vfo.offsetHz == 0L) "" else "%.3f".format(vfo.offsetHz / 1_000_000.0)
     ) }
     var saveName by remember { mutableStateOf("") }
 
