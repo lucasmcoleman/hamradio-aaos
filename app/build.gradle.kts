@@ -23,8 +23,8 @@ android {
         applicationId = "com.kk4fvc.benshiradiocontrol"
         minSdk = 29
         targetSdk = 34
-        versionCode = 8
-        versionName = "0.5.0"
+        versionCode = 9
+        versionName = "0.5.1"
     }
 
     signingConfigs {
@@ -78,7 +78,8 @@ val playKeyPath = keystoreProperties.getProperty("playServiceAccountKey", "")
 if (playKeyPath.isNotBlank() && file(playKeyPath).exists()) {
     play {
         serviceAccountCredentials.set(file(playKeyPath))
-        track.set("internal")  // internal testing track by default
+        track.set("internal")
+        releaseStatus.set(com.github.triplet.gradle.androidpublisher.ReleaseStatus.DRAFT)
         defaultToAppBundles.set(true)
     }
 }
