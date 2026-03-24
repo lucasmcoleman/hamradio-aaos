@@ -57,7 +57,7 @@ class BleScanner(private val context: Context) {
             val existing = seen[addr]
             val type = if (existing?.type == "Classic") "Dual" else "BLE"
             seen[addr] = ScannedDevice(name, addr, result.rssi, type)
-            _devices.value = seen.values.sortedByDescending { it.rssi }
+            updateDeviceList()
         }
 
         override fun onScanFailed(errorCode: Int) {
@@ -82,7 +82,7 @@ class BleScanner(private val context: Context) {
                     val existing = seen[addr]
                     val type = if (existing?.type == "BLE") "Dual" else "Classic"
                     seen[addr] = ScannedDevice(name, addr, rssi, type)
-                    _devices.value = seen.values.sortedByDescending { it.rssi }
+                    updateDeviceList()
                     Log.d(TAG, "Classic found: $name ($addr) rssi=$rssi")
                 }
                 BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> {
@@ -90,6 +90,15 @@ class BleScanner(private val context: Context) {
                 }
             }
         }
+    }
+
+    /** Stable sort: paired first, then alphabetically by name. Never reorders on RSSI changes. */
+    private fun updateDeviceList() {
+        _devices.value = seen.values.sortedWith(
+            compareByDescending<ScannedDevice> { it.type == "Paired" }
+                .thenBy { it.name }
+                .thenBy { it.address }
+        )
     }
 
     private var receiverRegistered = false
@@ -111,7 +120,7 @@ class BleScanner(private val context: Context) {
                 val addr = device.address ?: return@forEach
                 seen[addr] = ScannedDevice(name, addr, 0, "Paired")
             }
-            _devices.value = seen.values.sortedByDescending { it.rssi }
+            updateDeviceList()
         } catch (e: SecurityException) {
             Log.w(TAG, "Cannot read bonded devices", e)
         }
