@@ -5,6 +5,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.dagger.hilt.android")
+    id("com.github.triplet.play") version "3.11.0"
     kotlin("kapt")
 }
 
@@ -69,6 +70,16 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+}
+
+// Play Console publishing — ./gradlew publishReleaseBundle
+val playKeyPath = keystoreProperties.getProperty("playServiceAccountKey", "")
+if (playKeyPath.isNotBlank() && file(playKeyPath).exists()) {
+    play {
+        serviceAccountCredentials.set(file(playKeyPath))
+        track.set("internal")  // internal testing track by default
+        defaultToAppBundles.set(true)
     }
 }
 

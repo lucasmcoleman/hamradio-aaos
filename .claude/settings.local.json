@@ -8,7 +8,13 @@
       "Bash(\"F:\\\\AndroidStudioProjects\\\\hamradio-aaos\\\\local.properties\")",
       "Bash(./gradlew test:*)",
       "Bash(./gradlew assembleDebug)",
-      "Bash(./gradlew assembleDebug assembleRelease bundleRelease)"
+      "Bash(./gradlew assembleDebug assembleRelease bundleRelease)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "Bash(./gradlew tasks:*)",
+      "Bash(./gradlew publishReleaseBundle)",
+      "Bash(./gradlew publishReleaseBundle --stacktrace)",
+      "Bash(grep -v \"^$\")"
     ]
   }
 }
