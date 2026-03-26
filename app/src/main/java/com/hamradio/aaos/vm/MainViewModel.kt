@@ -10,6 +10,7 @@ import com.hamradio.aaos.radio.protocol.BssSettings
 import com.hamradio.aaos.radio.protocol.DeviceInfo
 import com.hamradio.aaos.radio.protocol.HtStatus
 import com.hamradio.aaos.radio.protocol.RadioSettings
+import com.hamradio.aaos.radio.protocol.RadioCommands
 import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.protocol.SubAudio
 import com.hamradio.aaos.radio.transport.ConnectionState
@@ -209,10 +210,13 @@ class MainViewModel @Inject constructor(
     fun selectChannelA(channelId: Int) = radio.setChannelA(channelId)
     fun selectChannelB(channelId: Int) = radio.setChannelB(channelId)
 
-    /** Switch the radio's active slot (0=A, 1=B). Updates vfoX in settings. */
+    /** Switch the radio's active A/B slot via DO_PROG_FUNC(TOGGLE_AB_CH). */
     fun setActiveSlot(slot: String) {
-        val vfoVal = if (slot == "B") 1 else 0
-        radio.updateSettings { it.copy(vfoX = vfoVal) }
+        // Only toggle if switching to the non-active slot
+        val currentSlot = if (settings.value?.vfoX == 1) "B" else "A"
+        if (slot != currentSlot) {
+            radio.sendRaw(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH, pressed = true))
+        }
     }
 
     fun setPower(on: Boolean) = radio.setHtPower(on)

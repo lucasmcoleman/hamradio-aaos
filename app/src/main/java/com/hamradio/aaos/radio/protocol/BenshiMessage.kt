@@ -198,13 +198,31 @@ object RadioCommands {
     // Programmable function effects (from benlink protocol research)
     // -----------------------------------------------------------------------
 
-    const val PF_MAIN_PTT      = 13
-    const val PF_SUB_PTT       = 14
-    const val PF_SEND_LOCATION = 15
-    const val PF_MONITOR       = 10
-    const val PF_MUTE          = 9
-    const val PF_TX_POWER      = 17
-    const val PF_ALARM         = 7
+    // PFEffectType values (from benlink pf.py)
+    const val PF_DISABLE          = 0
+    const val PF_ALARM            = 1
+    const val PF_ALARM_AND_MUTE   = 2
+    const val PF_TOGGLE_OFFLINE   = 3
+    const val PF_TOGGLE_RADIO_TX  = 4
+    const val PF_TOGGLE_TX_POWER  = 5
+    const val PF_TOGGLE_FM        = 6
+    const val PF_PREV_CHANNEL     = 7
+    const val PF_NEXT_CHANNEL     = 8
+    const val PF_T_CALL           = 9
+    const val PF_PREV_REGION      = 10
+    const val PF_NEXT_REGION      = 11
+    const val PF_TOGGLE_CH_SCAN   = 12
+    const val PF_MAIN_PTT         = 13
+    const val PF_SUB_PTT          = 14
+    const val PF_TOGGLE_MONITOR   = 15
+    const val PF_BT_PAIRING       = 16
+    const val PF_TOGGLE_DOUBLE_CH = 17
+    const val PF_TOGGLE_AB_CH     = 18
+    const val PF_SEND_LOCATION    = 19
+    const val PF_ONE_CLICK_LINK   = 20
+    const val PF_VOL_DOWN         = 21
+    const val PF_VOL_UP           = 22
+    const val PF_TOGGLE_MUTE      = 23
 
     /**
      * Trigger a programmable function on the radio.
