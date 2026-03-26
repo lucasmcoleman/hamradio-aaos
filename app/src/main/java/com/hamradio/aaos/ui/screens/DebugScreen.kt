@@ -170,6 +170,14 @@ fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
                 QuickCmd("GET_VOLUME")     { vm.sendRawCommand(RadioCommands.getVolume()) }
                 QuickCmd("GET_POSITION")   { vm.sendRawCommand(RadioCommands.getPosition()) }
                 QuickCmd("REFRESH CH")     { vm.refreshChannels() }
+                Text("PF Test", style = MaterialTheme.typography.titleMedium, color = TxRed)
+                QuickCmd("PF: TOGGLE A/B") { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH)) }
+                QuickCmd("PF: NEXT CH")    { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_NEXT_CHANNEL)) }
+                QuickCmd("PF: PREV CH")    { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_PREV_CHANNEL)) }
+                QuickCmd("PF: VOL UP")     { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_VOL_UP)) }
+                QuickCmd("PF: SCAN")       { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN)) }
+                QuickCmd("PF: MAIN PTT")   { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT)) }
+                QuickCmd("PF: TX POWER")   { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_TX_POWER)) }
             }
 
             // Transport badge
