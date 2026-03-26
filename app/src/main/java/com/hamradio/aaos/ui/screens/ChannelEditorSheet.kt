@@ -100,7 +100,7 @@ fun ChannelEditorSheet(
     val rxMhz = rxFreq.toDoubleOrNull()
     val txOutOfBand = txMhz != null && !isInKnownBand(txMhz)
     val rxOutOfBand = rxMhz != null && !isInKnownBand(rxMhz)
-    val canSave = name.isNotBlank() && txMhz != null && rxMhz != null
+    val canSave = txMhz != null && rxMhz != null
 
     fun buildAndSave() {
         if (canSave) {
