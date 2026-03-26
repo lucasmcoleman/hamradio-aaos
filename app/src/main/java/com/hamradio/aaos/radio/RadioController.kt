@@ -1,5 +1,9 @@
 package com.hamradio.aaos.radio
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothHeadset
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
@@ -51,6 +55,28 @@ class RadioController @Inject constructor(
     private var collectJob: Job? = null
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
+
+    // HFP proxy for PTT via virtual voice call
+    private var hfpProxy: BluetoothHeadset? = null
+    private val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+
+    init {
+        // Get the BluetoothHeadset proxy asynchronously
+        btManager?.adapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
+            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+                if (profile == BluetoothProfile.HEADSET) {
+                    hfpProxy = proxy as BluetoothHeadset
+                    Log.i(TAG, "HFP proxy connected")
+                }
+            }
+            override fun onServiceDisconnected(profile: Int) {
+                if (profile == BluetoothProfile.HEADSET) {
+                    hfpProxy = null
+                    Log.i(TAG, "HFP proxy disconnected")
+                }
+            }
+        }, BluetoothProfile.HEADSET)
+    }
 
     // -----------------------------------------------------------------------
     // Public state
@@ -150,13 +176,39 @@ class RadioController @Inject constructor(
 
     fun setHtPower(on: Boolean) = sendCmd(RadioCommands.setHtOnOff(on))
 
+    @SuppressLint("MissingPermission")
     fun pttDown() {
         requestAudioFocus()
-        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = true))
+        val proxy = hfpProxy
+        if (proxy != null) {
+            try {
+                // Start a virtual voice call — radio interprets HFP "off-hook" as PTT
+                @Suppress("DEPRECATION")
+                val started = proxy.startVoiceRecognition(proxy.connectedDevices.firstOrNull() ?: return)
+                Log.i(TAG, "PTT DOWN via HFP startVoiceRecognition: $started")
+            } catch (e: Exception) {
+                Log.e(TAG, "PTT DOWN failed", e)
+            }
+        } else {
+            Log.w(TAG, "PTT DOWN: HFP proxy not available, trying DO_PROG_FUNC fallback")
+            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = true))
+        }
     }
 
+    @SuppressLint("MissingPermission")
     fun pttUp() {
-        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = false))
+        val proxy = hfpProxy
+        if (proxy != null) {
+            try {
+                @Suppress("DEPRECATION")
+                val stopped = proxy.stopVoiceRecognition(proxy.connectedDevices.firstOrNull() ?: return)
+                Log.i(TAG, "PTT UP via HFP stopVoiceRecognition: $stopped")
+            } catch (e: Exception) {
+                Log.e(TAG, "PTT UP failed", e)
+            }
+        } else {
+            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = false))
+        }
         abandonAudioFocus()
     }
 
