@@ -280,7 +280,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus  = htStatus,
                     isPrimary = pttSlot == "A",
                     modifier  = Modifier.weight(weightA).fillMaxWidth(),
-                    onTap     = { pttSlot = "A" },
+                    onTap     = { pttSlot = "A"; vm.setActiveSlot("A") },
                     onLongPress = { showVfoEditor = "A" },
                     onModeToggle = { vm.toggleVfoMode("A") },
                 )
@@ -291,7 +291,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus   = htStatus,
                     isPrimary  = pttSlot == "A",
                     modifier   = Modifier.weight(weightA).fillMaxWidth(),
-                    onTap      = { pttSlot = "A" },
+                    onTap      = { pttSlot = "A"; vm.setActiveSlot("A") },
                     onLongPress = onNavigateToChannels,
                     onModeToggle = { vm.toggleVfoMode("A") },
                 )
@@ -304,7 +304,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus  = htStatus,
                     isPrimary = pttSlot == "B",
                     modifier  = Modifier.weight(weightB).fillMaxWidth(),
-                    onTap     = { pttSlot = "B" },
+                    onTap     = { pttSlot = "B"; vm.setActiveSlot("B") },
                     onLongPress = { showVfoEditor = "B" },
                     onModeToggle = { vm.toggleVfoMode("B") },
                 )
@@ -315,7 +315,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus   = htStatus,
                     isPrimary  = pttSlot == "B",
                     modifier   = Modifier.weight(weightB).fillMaxWidth(),
-                    onTap      = { pttSlot = "B" },
+                    onTap      = { pttSlot = "B"; vm.setActiveSlot("B") },
                     onLongPress = onNavigateToChannels,
                     onModeToggle = { vm.toggleVfoMode("B") },
                 )
