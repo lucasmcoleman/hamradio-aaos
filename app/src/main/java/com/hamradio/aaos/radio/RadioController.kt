@@ -152,11 +152,11 @@ class RadioController @Inject constructor(
 
     fun pttDown() {
         requestAudioFocus()
-        sendCmd(RadioCommands.setHtOnOff(true))
+        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = true))
     }
 
     fun pttUp() {
-        sendCmd(RadioCommands.setHtOnOff(false))
+        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = false))
         abandonAudioFocus()
     }
 

@@ -193,4 +193,26 @@ object RadioCommands {
     fun storeSettings() = BenshiMessage.basic(BasicCommand.STORE_SETTINGS)
 
     fun getPosition() = BenshiMessage.basic(BasicCommand.GET_POSITION)
+
+    // -----------------------------------------------------------------------
+    // Programmable function effects (from benlink protocol research)
+    // -----------------------------------------------------------------------
+
+    const val PF_MAIN_PTT      = 13
+    const val PF_SUB_PTT       = 14
+    const val PF_SEND_LOCATION = 15
+    const val PF_MONITOR       = 10
+    const val PF_MUTE          = 9
+    const val PF_TX_POWER      = 17
+    const val PF_ALARM         = 7
+
+    /**
+     * Trigger a programmable function on the radio.
+     * [effectType] is the PF effect (e.g., PF_MAIN_PTT = 13).
+     * [pressed] true = button down / activate, false = button up / release.
+     */
+    fun doProgFunc(effectType: Int, pressed: Boolean): BenshiMessage {
+        val body = byteArrayOf(effectType.toByte(), (if (pressed) 1 else 0).toByte())
+        return BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, body)
+    }
 }

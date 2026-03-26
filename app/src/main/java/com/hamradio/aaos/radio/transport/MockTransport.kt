@@ -143,7 +143,8 @@ class MockTransport(
             BasicCommand.REGISTER_NOTIFICATION -> { subscribedNotifications.add(msg.body.firstOrNull()?.toInt() ?: 0); replyOk(msg.command) }
             BasicCommand.CANCEL_NOTIFICATION   -> { subscribedNotifications.remove(msg.body.firstOrNull()?.toInt() ?: 0); replyOk(msg.command) }
             BasicCommand.GET_POSITION       -> replyPosition()
-            BasicCommand.SET_HT_ON_OFF      -> handlePtt(msg.body.firstOrNull()?.toInt() != 0)
+            BasicCommand.SET_HT_ON_OFF      -> replyOk(msg.command)  // power on/off only
+            BasicCommand.DO_PROG_FUNC       -> handleProgFunc(msg.body)
             BasicCommand.STOP_RINGING       -> replyOk(msg.command)
             BasicCommand.GET_APRS_PATH      -> replyAprsPath()
             else                            -> replyOk(msg.command)
@@ -294,9 +295,16 @@ class MockTransport(
         }
     }
 
-    private suspend fun handlePtt(transmit: Boolean) {
-        isInTx = transmit
-        replyOk(BasicCommand.SET_HT_ON_OFF)
+    private suspend fun handleProgFunc(body: ByteArray) {
+        if (body.size >= 2) {
+            val effect = body[0].toInt() and 0xFF
+            val pressed = body[1].toInt() != 0
+            // MAIN_PTT = 13, SUB_PTT = 14
+            if (effect == 13 || effect == 14) {
+                isInTx = pressed
+            }
+        }
+        replyOk(BasicCommand.DO_PROG_FUNC)
         if (RadioNotification.HT_STATUS_CHANGED.code in subscribedNotifications) {
             emitNotification(RadioNotification.HT_STATUS_CHANGED, buildHtStatusBytes())
         }
