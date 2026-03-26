@@ -297,11 +297,18 @@ class MockTransport(
 
     private suspend fun handleProgFunc(body: ByteArray) {
         if (body.size >= 2) {
-            val effect = body[0].toInt() and 0xFF
-            val pressed = body[1].toInt() != 0
-            // MAIN_PTT = 13, SUB_PTT = 14
-            if (effect == 13 || effect == 14) {
-                isInTx = pressed
+            // PF structure: byte0 = [buttonId(4)][action(4)], byte1 = [effect(8)]
+            val action = body[0].toInt() and 0x0F
+            val effect = body[1].toInt() and 0xFF
+            when (effect) {
+                13, 14 -> { // MAIN_PTT, SUB_PTT
+                    isInTx = action == 1 // SHORT = start TX, LONG_RELEASE = stop TX
+                }
+                18 -> { // TOGGLE_AB_CH
+                    val tmp = currentChannelA
+                    currentChannelA = currentChannelB
+                    currentChannelB = tmp
+                }
             }
         }
         replyOk(BasicCommand.DO_PROG_FUNC)

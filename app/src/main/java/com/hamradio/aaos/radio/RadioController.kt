@@ -191,7 +191,7 @@ class RadioController @Inject constructor(
             }
         } else {
             Log.w(TAG, "PTT DOWN: HFP proxy not available, trying DO_PROG_FUNC fallback")
-            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = true))
+            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, RadioCommands.PF_ACTION_SHORT))
         }
     }
 
@@ -207,7 +207,7 @@ class RadioController @Inject constructor(
                 Log.e(TAG, "PTT UP failed", e)
             }
         } else {
-            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, pressed = false))
+            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, RadioCommands.PF_ACTION_LONG_RELEASE))
         }
         abandonAudioFocus()
     }

@@ -103,8 +103,8 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch {
             settings.collect { s ->
                 if (s != null) {
-                    _vfoA.value = _vfoA.value.copy(freqHz = s.vfo1ModFreqHz)
-                    _vfoB.value = _vfoB.value.copy(freqHz = s.vfo2ModFreqHz)
+                    if (s.vfo1ModFreqHz > 0) _vfoA.value = _vfoA.value.copy(freqHz = s.vfo1ModFreqHz)
+                    if (s.vfo2ModFreqHz > 0) _vfoB.value = _vfoB.value.copy(freqHz = s.vfo2ModFreqHz)
                 }
             }
         }
@@ -215,7 +215,7 @@ class MainViewModel @Inject constructor(
         // Only toggle if switching to the non-active slot
         val currentSlot = if (settings.value?.vfoX == 1) "B" else "A"
         if (slot != currentSlot) {
-            radio.sendRaw(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH, pressed = true))
+            radio.sendRaw(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH))
         }
     }
 
