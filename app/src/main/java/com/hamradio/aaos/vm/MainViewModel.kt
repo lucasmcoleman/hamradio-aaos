@@ -97,6 +97,18 @@ class MainViewModel @Inject constructor(
         }
     }
 
+    init {
+        // Sync VFO frequencies from radio settings when they arrive
+        viewModelScope.launch {
+            settings.collect { s ->
+                if (s != null) {
+                    _vfoA.value = _vfoA.value.copy(freqHz = s.vfo1ModFreqHz)
+                    _vfoB.value = _vfoB.value.copy(freqHz = s.vfo2ModFreqHz)
+                }
+            }
+        }
+    }
+
     /** The currently active channel A object (null if channels not loaded). */
     val activeChannelA: StateFlow<RfChannel?> = combine(channels, settings) { chs, s ->
         s?.let { chs.firstOrNull { ch -> ch.channelId == it.channelA } }
