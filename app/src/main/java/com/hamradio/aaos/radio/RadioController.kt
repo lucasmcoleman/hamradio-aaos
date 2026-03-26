@@ -293,17 +293,42 @@ class RadioController @Inject constructor(
     // -----------------------------------------------------------------------
 
     private suspend fun initializeRadio() {
-        // 1. Request device info
+        // Small delay to let RFCOMM connection stabilize
+        delay(500)
+
+        // 1. Register for all notifications first
+        RadioCommands.registerAllNotifications().forEach {
+            transport.send(it)
+            delay(50)  // space out commands for real hardware
+        }
+
+        // 2. Request device info
         transport.send(RadioCommands.getDevInfo())
-        // 2. Register for all notifications
-        RadioCommands.registerAllNotifications().forEach { transport.send(it) }
+        delay(200)
+
         // 3. Request current status, settings, volume, battery
         transport.send(RadioCommands.getHtStatus())
+        delay(50)
         transport.send(RadioCommands.getSettings())
+        delay(50)
         transport.send(RadioCommands.getVolume())
+        delay(50)
         transport.send(RadioCommands.readBatteryStatus())
+        delay(50)
         transport.send(RadioCommands.getBssSettings())
+        delay(50)
         transport.send(RadioCommands.getPosition())
+
+        // 4. Wait for DevInfo reply, then load channels if not already loaded
+        delay(2000)
+        if (_channels.value.isEmpty()) {
+            val count = _deviceInfo.value?.channelCount?.coerceAtMost(MAX_CHANNELS) ?: 16
+            Log.i(TAG, "Channels not loaded from DevInfo reply, fetching $count channels")
+            for (i in 0 until count) {
+                transport.send(RadioCommands.readChannel(i))
+                delay(50)
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
