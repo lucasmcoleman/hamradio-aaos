@@ -1125,7 +1125,7 @@ private fun ConnectionSheet(
                 }
                 val blePermissions = remember {
                     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S)
-                        arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT)
+                        arrayOf(android.Manifest.permission.BLUETOOTH_SCAN, android.Manifest.permission.BLUETOOTH_CONNECT, android.Manifest.permission.RECORD_AUDIO)
                     else
                         arrayOf(android.Manifest.permission.ACCESS_FINE_LOCATION)
                 }
