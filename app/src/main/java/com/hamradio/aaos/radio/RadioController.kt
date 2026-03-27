@@ -1,14 +1,11 @@
 package com.hamradio.aaos.radio
 
-import android.annotation.SuppressLint
-import android.bluetooth.BluetoothHeadset
-import android.bluetooth.BluetoothManager
-import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.util.Log
+import com.hamradio.aaos.radio.audio.RadioAudioChannel
 import com.hamradio.aaos.radio.protocol.AprsPacket
 import com.hamradio.aaos.radio.protocol.BasicCommand
 import com.hamradio.aaos.radio.protocol.BenshiMessage
@@ -56,27 +53,11 @@ class RadioController @Inject constructor(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var audioFocusRequest: AudioFocusRequest? = null
 
-    // HFP proxy for PTT via virtual voice call
-    private var hfpProxy: BluetoothHeadset? = null
-    private val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+    // Audio channel for PTT — separate RFCOMM connection for SBC voice
+    private var audioChannel: RadioAudioChannel? = null
 
-    init {
-        // Get the BluetoothHeadset proxy asynchronously
-        btManager?.adapter?.getProfileProxy(context, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile == BluetoothProfile.HEADSET) {
-                    hfpProxy = proxy as BluetoothHeadset
-                    Log.i(TAG, "HFP proxy connected")
-                }
-            }
-            override fun onServiceDisconnected(profile: Int) {
-                if (profile == BluetoothProfile.HEADSET) {
-                    hfpProxy = null
-                    Log.i(TAG, "HFP proxy disconnected")
-                }
-            }
-        }, BluetoothProfile.HEADSET)
-    }
+    /** Expose audio transmit state for UI. */
+    val isAudioTransmitting get() = audioChannel?.isTransmitting
 
     // -----------------------------------------------------------------------
     // Public state
@@ -138,9 +119,26 @@ class RadioController @Inject constructor(
                 startCollecting()
                 withTimeoutOrNull(10_000L) { initializeRadio() }
                     ?: Log.w(TAG, "Radio init sequence timed out")
+
+                // Connect audio channel for PTT (separate RFCOMM connection)
+                connectAudioChannel()
             } catch (e: Exception) {
                 Log.e(TAG, "Connect failed", e)
             }
+        }
+    }
+
+    private suspend fun connectAudioChannel() {
+        val addr = (transport as? com.hamradio.aaos.radio.transport.RfcommTransport)?.deviceAddress
+            ?: return
+        try {
+            val channel = RadioAudioChannel(context, addr)
+            delay(1000) // let data connection stabilize
+            channel.connect()
+            audioChannel = channel
+            Log.i(TAG, "Audio channel connected for PTT")
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio channel connect failed: ${e.message}")
         }
     }
 
@@ -176,38 +174,23 @@ class RadioController @Inject constructor(
 
     fun setHtPower(on: Boolean) = sendCmd(RadioCommands.setHtOnOff(on))
 
-    @SuppressLint("MissingPermission")
     fun pttDown() {
         requestAudioFocus()
-        val proxy = hfpProxy
-        if (proxy != null) {
-            try {
-                // Start a virtual voice call — radio interprets HFP "off-hook" as PTT
-                @Suppress("DEPRECATION")
-                val started = proxy.startVoiceRecognition(proxy.connectedDevices.firstOrNull() ?: return)
-                Log.i(TAG, "PTT DOWN via HFP startVoiceRecognition: $started")
-            } catch (e: Exception) {
-                Log.e(TAG, "PTT DOWN failed", e)
-            }
+        val channel = audioChannel
+        if (channel != null && channel.isConnected.value) {
+            channel.startTransmit()
+            Log.i(TAG, "PTT DOWN via audio channel")
         } else {
-            Log.w(TAG, "PTT DOWN: HFP proxy not available, trying DO_PROG_FUNC fallback")
-            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, RadioCommands.PF_ACTION_SHORT))
+            Log.w(TAG, "PTT DOWN: audio channel not connected")
+            _errorEvent.tryEmit("Audio channel not connected — PTT unavailable")
         }
     }
 
-    @SuppressLint("MissingPermission")
     fun pttUp() {
-        val proxy = hfpProxy
-        if (proxy != null) {
-            try {
-                @Suppress("DEPRECATION")
-                val stopped = proxy.stopVoiceRecognition(proxy.connectedDevices.firstOrNull() ?: return)
-                Log.i(TAG, "PTT UP via HFP stopVoiceRecognition: $stopped")
-            } catch (e: Exception) {
-                Log.e(TAG, "PTT UP failed", e)
-            }
-        } else {
-            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT, RadioCommands.PF_ACTION_LONG_RELEASE))
+        val channel = audioChannel
+        if (channel != null) {
+            channel.stopTransmit()
+            Log.i(TAG, "PTT UP via audio channel")
         }
         abandonAudioFocus()
     }
