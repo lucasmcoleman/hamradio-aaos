@@ -374,7 +374,11 @@ class RadioController @Inject constructor(
                 HtStatus.decode(payload)?.let { _htStatus.value = it }
             }
             BasicCommand.READ_SETTINGS -> {
-                RadioSettings.decode(payload)?.let { _settings.value = it }
+                Log.i(TAG, "Settings payload: ${payload.size} bytes, hex=${payload.take(24).joinToString(" ") { "%02x".format(it) }}")
+                RadioSettings.decode(payload)?.let {
+                    Log.i(TAG, "Settings decoded: chA=${it.channelA} chB=${it.channelB} vfo1=${it.vfo1ModFreqHz} vfo2=${it.vfo2ModFreqHz}")
+                    _settings.value = it
+                }
             }
             BasicCommand.READ_BSS_SETTINGS -> {
                 BssSettings.decode(payload)?.let { _bssSettings.value = it }

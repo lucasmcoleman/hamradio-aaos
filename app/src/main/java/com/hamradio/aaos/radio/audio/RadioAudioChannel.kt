@@ -106,8 +106,12 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
      * Start transmitting — captures microphone audio, encodes to SBC, sends to radio.
      * The radio automatically keys up when it receives audio data.
      */
+    @SuppressLint("MissingPermission")
     fun startTransmit() {
-        if (_isTransmitting.value || !_isConnected.value) return
+        if (_isTransmitting.value || !_isConnected.value) {
+            Log.w(TAG, "Cannot start TX: transmitting=${_isTransmitting.value}, connected=${_isConnected.value}")
+            return
+        }
         _isTransmitting.value = true
 
         transmitJob = scope.launch {
@@ -119,27 +123,33 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
                 val minBufSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
                 val bufSize = maxOf(minBufSize, SbcCodec.PCM_BYTES_PER_FRAME * 4)
 
-                audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.MIC,
-                    sampleRate,
-                    channelConfig,
-                    audioFormat,
-                    bufSize,
-                )
+                audioRecord = try {
+                    AudioRecord(
+                        MediaRecorder.AudioSource.MIC,
+                        sampleRate,
+                        channelConfig,
+                        audioFormat,
+                        bufSize,
+                    )
+                } catch (e: SecurityException) {
+                    Log.e(TAG, "RECORD_AUDIO permission not granted", e)
+                    _isTransmitting.value = false
+                    return@launch
+                }
 
-                if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+                if (audioRecord == null || audioRecord.state != AudioRecord.STATE_INITIALIZED) {
                     Log.e(TAG, "AudioRecord failed to initialize")
                     _isTransmitting.value = false
                     return@launch
                 }
 
-                audioRecord.startRecording()
+                audioRecord!!.startRecording()
                 Log.i(TAG, "TX: Microphone capture started")
 
                 val pcmBuffer = ShortArray(SbcCodec.SAMPLES_PER_FRAME)
 
                 while (isActive && _isTransmitting.value) {
-                    val read = audioRecord.read(pcmBuffer, 0, SbcCodec.SAMPLES_PER_FRAME)
+                    val read = audioRecord!!.read(pcmBuffer, 0, SbcCodec.SAMPLES_PER_FRAME)
                     if (read <= 0) continue
 
                     // Encode PCM to SBC
