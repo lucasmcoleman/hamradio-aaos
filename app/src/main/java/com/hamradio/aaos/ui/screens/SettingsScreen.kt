@@ -184,8 +184,8 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
         SettingsGroup("Audio Levels") {
             CyclableSettingRow(
                 label = "Local Speaker",
-                value = when (s.localSpeaker) { 0 -> "Normal"; 1 -> "Low"; 2 -> "Mute"; else -> "High" },
-                onCycle = { vm.updateSettings { it.copy(localSpeaker = (it.localSpeaker + 1) % 4) } },
+                value = if (s.localSpeaker >= 2) "Off" else "On",
+                onCycle = { vm.updateSettings { it.copy(localSpeaker = if (it.localSpeaker >= 2) 0 else 2) } },
             )
             SettingRow("Mic Gain") {
                 LevelSlider(value = s.micGain, max = 7, onValue = { v -> vm.updateSettings { it.copy(micGain = v) } })

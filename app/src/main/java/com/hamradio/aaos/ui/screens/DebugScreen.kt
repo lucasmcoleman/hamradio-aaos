@@ -179,6 +179,14 @@ fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
                 QuickCmd("TX POWER")     { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_TX_POWER)) }
                 QuickCmd("MONITOR")      { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_MONITOR)) }
                 QuickCmd("GET_PF")       { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.GET_PF, byteArrayOf())) }
+                Text("VFO Test", style = MaterialTheme.typography.titleMedium, color = Accent)
+                // FREQ_MODE_SET_PAR (cmd 35) — try enabling VFO mode
+                QuickCmd("VFO ON [00,01]")  { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.FREQ_MODE_SET_PAR, byteArrayOf(0, 1))) }
+                QuickCmd("VFO OFF [00,00]") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.FREQ_MODE_SET_PAR, byteArrayOf(0, 0))) }
+                QuickCmd("VFO [01]")        { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.FREQ_MODE_SET_PAR, byteArrayOf(1))) }
+                QuickCmd("VFO [00]")        { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.FREQ_MODE_SET_PAR, byteArrayOf(0))) }
+                // FREQ_MODE_GET_STATUS (cmd 36)
+                QuickCmd("VFO STATUS")      { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.FREQ_MODE_GET_STATUS, byteArrayOf())) }
             }
 
             // Transport badge
