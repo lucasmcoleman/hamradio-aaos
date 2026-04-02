@@ -78,7 +78,7 @@ fun ChannelEditorSheet(
     var name by remember { mutableStateOf(channel.name) }
     var txFreq by remember { mutableStateOf("%.3f".format(channel.txFreqMhz)) }
     var rxFreq by remember { mutableStateOf("%.3f".format(channel.rxFreqMhz)) }
-    // 0=High(50W), 1=Medium(25W), 2=Low(8W)
+    // 0=High, 1=Medium, 2=Low
     var powerLevel by remember { mutableStateOf(
         when { channel.txAtMaxPower -> 0; channel.txAtMedPower -> 1; else -> 2 }
     ) }
@@ -194,7 +194,7 @@ fun ChannelEditorSheet(
             ) {
                 CycleCol(
                     label = "Power",
-                    value = when (powerLevel) { 0 -> "50W"; 1 -> "25W"; else -> "8W" },
+                    value = when (powerLevel) { 0 -> "High"; 1 -> "Medium"; else -> "Low" },
                     onClick = { powerLevel = (powerLevel + 1) % 3 },
                 )
                 ToggleCol("Wide BW", bandwidth == BandwidthType.WIDE) {

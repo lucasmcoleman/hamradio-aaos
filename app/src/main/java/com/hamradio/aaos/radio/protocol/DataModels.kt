@@ -441,7 +441,7 @@ data class BssSettings(
     val packetFormat: Int = 0,       // 0=BSS 1=APRS
     val allowPositionCheck: Boolean = true,
     val aprsSsid: Int = 0,
-    val locationShareIntervalSec: Int = 60,
+    val locationShareIntervalSec: Int = 120,
     val bssUserIdLower: Long = 0,
     val pttReleaseIdInfo: String = "",
     val beaconMessage: String = "",
@@ -547,6 +547,69 @@ data class DeviceInfo(
                 channelCount      = bytes[8].toInt() and 0xFF,
                 freqRangeCount    = (bytes[9].toInt() and 0xF0) shr 4,
             )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPS Position (from GET_POSITION reply)
+// ---------------------------------------------------------------------------
+
+data class RadioPosition(
+    val latitude: Double = 0.0,
+    val longitude: Double = 0.0,
+    val altitudeMeters: Int = 0,
+    val speedKnots: Int = 0,
+    val headingDegrees: Int = 0,
+    val timestampUtc: Long = 0,
+    val accuracy: Int = 0,
+    val locked: Boolean = false,
+) {
+    val speedMph: Double get() = speedKnots * 1.15078
+    val speedKmh: Double get() = speedKnots * 1.852
+
+    companion object {
+        /**
+         * Decode position from GET_POSITION reply payload.
+         * Format from HTCommander:
+         *   Bytes 0-2: latitude raw (24-bit, value / 60 / 500 = degrees)
+         *   Bytes 3-5: longitude raw (24-bit, same encoding)
+         *   Bytes 6-7: altitude (16-bit, meters)
+         *   Bytes 8-9: speed (16-bit, knots)
+         *   Bytes 10-11: heading (16-bit, degrees)
+         *   Bytes 12-15: unix timestamp (32-bit)
+         *   Bytes 16-17: accuracy (16-bit)
+         */
+        fun decode(bytes: ByteArray): RadioPosition? {
+            if (bytes.size < 6) return null
+            val latRaw = ((bytes[0].toInt() and 0xFF) shl 16) or
+                         ((bytes[1].toInt() and 0xFF) shl 8) or
+                         (bytes[2].toInt() and 0xFF)
+            val lonRaw = ((bytes[3].toInt() and 0xFF) shl 16) or
+                         ((bytes[4].toInt() and 0xFF) shl 8) or
+                         (bytes[5].toInt() and 0xFF)
+            // Convert from raw to decimal degrees (signed 24-bit / 60 / 500)
+            val latSigned = if (latRaw > 0x7FFFFF) latRaw - 0x1000000 else latRaw
+            val lonSigned = if (lonRaw > 0x7FFFFF) lonRaw - 0x1000000 else lonRaw
+            val lat = latSigned / 60.0 / 500.0
+            val lon = lonSigned / 60.0 / 500.0
+
+            val alt = if (bytes.size >= 8)
+                ((bytes[6].toInt() and 0xFF) shl 8) or (bytes[7].toInt() and 0xFF) else 0
+            val speed = if (bytes.size >= 10)
+                ((bytes[8].toInt() and 0xFF) shl 8) or (bytes[9].toInt() and 0xFF) else 0
+            val heading = if (bytes.size >= 12)
+                ((bytes[10].toInt() and 0xFF) shl 8) or (bytes[11].toInt() and 0xFF) else 0
+            val timestamp = if (bytes.size >= 16)
+                ((bytes[12].toLong() and 0xFF) shl 24) or
+                ((bytes[13].toLong() and 0xFF) shl 16) or
+                ((bytes[14].toLong() and 0xFF) shl 8) or
+                (bytes[15].toLong() and 0xFF) else 0L
+            val accuracy = if (bytes.size >= 18)
+                ((bytes[16].toInt() and 0xFF) shl 8) or (bytes[17].toInt() and 0xFF) else 0
+
+            val locked = lat != 0.0 || lon != 0.0
+            return RadioPosition(lat, lon, alt, speed, heading, timestamp, accuracy, locked)
         }
     }
 }

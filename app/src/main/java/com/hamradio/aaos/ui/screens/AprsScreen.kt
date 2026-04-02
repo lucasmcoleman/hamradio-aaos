@@ -138,6 +138,18 @@ fun AprsScreen(vm: MainViewModel) {
             ToggleRow("Send ID on PTT",    b.pttReleaseSendIdInfo) { v -> vm.updateBssSettings { it.copy(pttReleaseSendIdInfo = v) } }
         }
 
+        // Smart beaconing
+        val smartEnabled by vm.smartBeaconEnabled.collectAsStateWithLifecycle()
+        val pos by vm.position.collectAsStateWithLifecycle()
+        AprsGroup("Smart Beaconing") {
+            ToggleRow("Enable Smart Beacon", smartEnabled) { vm.setSmartBeaconEnabled(it) }
+            AprsInfoRow("GPS Speed", "%.1f mph".format(pos.speedMph))
+            AprsInfoRow("Heading", "${pos.headingDegrees}°")
+            if (smartEnabled) {
+                AprsInfoRow("Mode", "90s fast / 30min slow / 30° turn")
+            }
+        }
+
         // Power / position
         AprsGroup("Options") {
             ToggleRow("Send Power/Voltage",  b.sendPwrVoltage)     { v -> vm.updateBssSettings { it.copy(sendPwrVoltage = v) } }
