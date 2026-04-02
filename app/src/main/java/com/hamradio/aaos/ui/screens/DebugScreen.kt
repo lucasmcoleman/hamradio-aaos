@@ -171,13 +171,20 @@ fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
                 QuickCmd("GET_POSITION")   { vm.sendRawCommand(RadioCommands.getPosition()) }
                 QuickCmd("REFRESH CH")     { vm.refreshChannels() }
                 Text("PF Test", style = MaterialTheme.typography.titleMedium, color = TxRed)
-                QuickCmd("PF: TOGGLE A/B") { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH)) }
-                QuickCmd("PF: NEXT CH")    { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_NEXT_CHANNEL)) }
-                QuickCmd("PF: PREV CH")    { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_PREV_CHANNEL)) }
-                QuickCmd("PF: VOL UP")     { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_VOL_UP)) }
-                QuickCmd("PF: SCAN")       { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN)) }
-                QuickCmd("PF: MAIN PTT")   { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT)) }
-                QuickCmd("PF: TX POWER")   { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_TX_POWER)) }
+                // Format A: current [btn|action, effect] - 2 bytes
+                QuickCmd("A: A/B [01,12]") { vm.sendRawCommand(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH)) }
+                // Format B: just effect as single byte
+                QuickCmd("B: A/B [12]") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, byteArrayOf(18))) }
+                // Format C: effect then 1 (activate)
+                QuickCmd("C: A/B [12,01]") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, byteArrayOf(18, 1))) }
+                // Format D: 0 then effect
+                QuickCmd("D: A/B [00,12]") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, byteArrayOf(0, 18))) }
+                // Format E: empty body (just the command)
+                QuickCmd("E: A/B []") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, byteArrayOf())) }
+                // Format F: 3 bytes [btn, action, effect]
+                QuickCmd("F: A/B [00,01,12]") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, byteArrayOf(0, 1, 18))) }
+                // GET_PF to see what radio reports
+                QuickCmd("GET_PF") { vm.sendRawCommand(BenshiMessage.basic(BasicCommand.GET_PF, byteArrayOf())) }
             }
 
             // Transport badge
