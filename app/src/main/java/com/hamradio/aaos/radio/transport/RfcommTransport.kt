@@ -7,6 +7,7 @@ import android.content.Context
 import android.util.Log
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import com.hamradio.aaos.radio.protocol.GaiaFrame
+import com.hamradio.aaos.radio.protocol.RadioCommands
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -141,19 +142,41 @@ class RfcommTransport(
 
     private suspend fun readLoop() {
         val buf = ByteArray(1024)
+        var idleCount = 0
         try {
             while (scope.isActive) {
                 val stream = inputStream ?: break
-                val bytesRead = withContext(Dispatchers.IO) {
-                    stream.read(buf)
-                }
-                if (bytesRead == -1) {
-                    Log.w(TAG, "RFCOMM stream ended")
-                    break
-                }
-                if (bytesRead > 0) {
-                    receiveBuffer.write(buf, 0, bytesRead)
-                    processReceiveBuffer()
+                val available = withContext(Dispatchers.IO) { stream.available() }
+                if (available > 0) {
+                    idleCount = 0
+                    val bytesRead = withContext(Dispatchers.IO) {
+                        stream.read(buf, 0, minOf(available, buf.size))
+                    }
+                    if (bytesRead == -1) {
+                        Log.w(TAG, "RFCOMM stream ended")
+                        break
+                    }
+                    if (bytesRead > 0) {
+                        receiveBuffer.write(buf, 0, bytesRead)
+                        processReceiveBuffer()
+                    }
+                } else {
+                    delay(100) // poll every 100ms
+                    idleCount++
+                    if (idleCount >= 100) {
+                        // 10 seconds idle — ping the radio
+                        idleCount = 0
+                        try {
+                            val ping = GaiaFrame.encode(RadioCommands.getHtStatus())
+                            withContext(Dispatchers.IO) {
+                                outputStream?.write(ping)
+                                outputStream?.flush()
+                            }
+                        } catch (e: IOException) {
+                            Log.w(TAG, "Ping failed — radio disconnected: ${e.message}")
+                            break
+                        }
+                    }
                 }
             }
         } catch (e: IOException) {
