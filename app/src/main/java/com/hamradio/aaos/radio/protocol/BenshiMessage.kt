@@ -224,25 +224,12 @@ object RadioCommands {
     const val PF_VOL_UP           = 22
     const val PF_TOGGLE_MUTE      = 23
 
-    // PFActionType values
-    const val PF_ACTION_SHORT       = 1
-    const val PF_ACTION_LONG        = 2
-    const val PF_ACTION_LONG_RELEASE = 9
-
     /**
      * Trigger a programmable function on the radio.
-     *
-     * Body is the 2-byte PF structure:
-     *   Byte 0: [button_id (4 bits)][action (4 bits)]
-     *   Byte 1: [effect (8 bits)]
-     *
-     * [effectType] is the PF effect (e.g., PF_MAIN_PTT = 13).
-     * [action] is PFActionType (e.g., SHORT=1, LONG_RELEASE=9).
-     * [buttonId] is the virtual button ID (default 0).
+     * Body format: [0x00, effectType] — confirmed working on DB50-B.
      */
-    fun doProgFunc(effectType: Int, action: Int = PF_ACTION_SHORT, buttonId: Int = 0): BenshiMessage {
-        val byte0 = ((buttonId and 0x0F) shl 4) or (action and 0x0F)
-        val body = byteArrayOf(byte0.toByte(), effectType.toByte())
+    fun doProgFunc(effectType: Int): BenshiMessage {
+        val body = byteArrayOf(0x00, effectType.toByte())
         return BenshiMessage.basic(BasicCommand.DO_PROG_FUNC, body)
     }
 }
