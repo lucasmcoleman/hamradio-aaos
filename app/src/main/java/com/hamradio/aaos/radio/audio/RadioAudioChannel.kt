@@ -4,8 +4,11 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
@@ -51,9 +54,13 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
     private var inputStream: InputStream? = null
     private var outputStream: OutputStream? = null
     private var transmitJob: Job? = null
+    private var receiveJob: Job? = null
 
     private val _isTransmitting = MutableStateFlow(false)
     val isTransmitting: StateFlow<Boolean> = _isTransmitting.asStateFlow()
+
+    private val _isReceiving = MutableStateFlow(false)
+    val isReceiving: StateFlow<Boolean> = _isReceiving.asStateFlow()
 
     private val _isConnected = MutableStateFlow(false)
     val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
@@ -90,6 +97,9 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
             outputStream = sock.outputStream
             _isConnected.value = true
             Log.i(TAG, "Audio channel connected")
+
+            // Auto-start RX audio playback
+            startReceive()
         } catch (e: Exception) {
             Log.e(TAG, "Audio channel connect failed: ${e.message}")
             closeSocket()
@@ -97,6 +107,7 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
     }
 
     suspend fun disconnect() {
+        stopReceive()
         stopTransmit()
         closeSocket()
         _isConnected.value = false
@@ -190,6 +201,163 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
         _isTransmitting.value = false
         transmitJob?.cancel()
         transmitJob = null
+    }
+
+    // -----------------------------------------------------------------------
+    // RX audio — read SBC frames from radio, decode, play through speaker
+    // -----------------------------------------------------------------------
+
+    private fun startReceive() {
+        if (receiveJob != null) return
+        _isReceiving.value = true
+
+        receiveJob = scope.launch {
+            var audioTrack: AudioTrack? = null
+            try {
+                val sampleRate = 32000
+                val bufSize = AudioTrack.getMinBufferSize(
+                    sampleRate,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                )
+
+                audioTrack = AudioTrack.Builder()
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .setAudioFormat(
+                        AudioFormat.Builder()
+                            .setSampleRate(sampleRate)
+                            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                            .build()
+                    )
+                    .setBufferSizeInBytes(maxOf(bufSize, SbcCodec.PCM_BYTES_PER_FRAME * 4))
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+
+                audioTrack.play()
+                Log.i(TAG, "RX: AudioTrack started")
+
+                val readBuf = ByteArray(1024)
+                val accumulator = ByteArrayOutputStream(4096)
+
+                while (isActive && _isConnected.value) {
+                    val stream = inputStream ?: break
+                    val available = withContext(Dispatchers.IO) {
+                        try { stream.available() } catch (_: IOException) { -1 }
+                    }
+                    if (available < 0) break
+                    if (available == 0) {
+                        delay(10)
+                        continue
+                    }
+
+                    val bytesRead = withContext(Dispatchers.IO) {
+                        try { stream.read(readBuf, 0, minOf(available, readBuf.size)) }
+                        catch (_: IOException) { -1 }
+                    }
+                    if (bytesRead <= 0) break
+
+                    accumulator.write(readBuf, 0, bytesRead)
+
+                    // Extract and decode complete frames
+                    val data = accumulator.toByteArray()
+                    val remaining = processRxFrames(data, audioTrack)
+                    accumulator.reset()
+                    if (remaining != null) {
+                        accumulator.write(remaining)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "RX error", e)
+            } finally {
+                audioTrack?.stop()
+                audioTrack?.release()
+                _isReceiving.value = false
+                Log.i(TAG, "RX: Stopped")
+            }
+        }
+    }
+
+    private fun stopReceive() {
+        _isReceiving.value = false
+        receiveJob?.cancel()
+        receiveJob = null
+    }
+
+    /**
+     * Extract 0x7E-delimited frames from buffer, unescape, decode SBC, write PCM to AudioTrack.
+     * @return remaining unprocessed bytes, or null if fully consumed
+     */
+    private fun processRxFrames(data: ByteArray, audioTrack: AudioTrack): ByteArray? {
+        var offset = 0
+
+        // Skip to first 0x7E
+        while (offset < data.size && data[offset] != 0x7E.toByte()) offset++
+
+        while (offset < data.size) {
+            // Find start delimiter
+            if (data[offset] != 0x7E.toByte()) { offset++; continue }
+            val start = offset
+            offset++ // skip start 0x7E
+
+            // Find end delimiter
+            while (offset < data.size && data[offset] != 0x7E.toByte()) offset++
+            if (offset >= data.size) {
+                // Incomplete frame — return from start for next iteration
+                return data.copyOfRange(start, data.size)
+            }
+
+            // Extract frame content (between delimiters, skip cmd byte)
+            val frameEnd = offset
+            offset++ // skip end 0x7E
+
+            if (frameEnd - start <= 2) continue // empty or just cmd byte
+
+            // Unescape the frame content (skip start 0x7E and cmd byte)
+            val unescaped = unescapeFrame(data, start + 2, frameEnd)
+
+            // Check if it's an end-audio marker (very short frame)
+            if (unescaped.size <= 8) continue
+
+            // Decode SBC frames from the unescaped data
+            var sbcOffset = 0
+            while (sbcOffset < unescaped.size) {
+                val pcm = SbcCodec.decode(unescaped, sbcOffset)
+                if (pcm != null) {
+                    // Write PCM to AudioTrack
+                    audioTrack.write(pcm, 0, pcm.size)
+                    // Advance past this SBC frame — estimate frame size from bitpool
+                    val frameSize = 4 + (4 * SbcCodec.SUBBANDS) / 8 +
+                        (SbcCodec.BLOCKS * SbcCodec.BITPOOL + 7) / 8
+                    sbcOffset += frameSize
+                } else {
+                    sbcOffset++ // skip invalid byte
+                }
+            }
+        }
+
+        return null // fully consumed
+    }
+
+    private fun unescapeFrame(data: ByteArray, start: Int, end: Int): ByteArray {
+        val out = ByteArrayOutputStream(end - start)
+        var i = start
+        while (i < end) {
+            val b = data[i].toInt() and 0xFF
+            if (b == 0x7D && i + 1 < end) {
+                out.write((data[i + 1].toInt() and 0xFF) xor 0x20)
+                i += 2
+            } else {
+                out.write(b)
+                i++
+            }
+        }
+        return out.toByteArray()
     }
 
     // -----------------------------------------------------------------------

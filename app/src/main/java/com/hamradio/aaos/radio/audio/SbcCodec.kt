@@ -139,11 +139,113 @@ object SbcCodec {
      * Decode an SBC frame to PCM samples.
      * @return 128 mono 16-bit PCM samples, or null on error
      */
+    // Synthesis filter buffer for decoding
+    private val synthesisBuffer = DoubleArray(160)
+
+    // Precomputed synthesis filter (transpose of analysis)
+    private val synthesisFilter: Array<DoubleArray> = Array(8) { k ->
+        DoubleArray(80) { i ->
+            val proto = protoCoeffs8[i]
+            proto * cos((k + 0.5) * (i - 3.5) * PI / 8.0) * SUBBANDS.toDouble()
+        }
+    }
+
+    /**
+     * Decode an SBC frame to 128 mono 16-bit PCM samples.
+     * @return ShortArray of PCM samples, or null if invalid frame
+     */
     fun decode(frame: ByteArray, offset: Int = 0): ShortArray? {
-        if (offset >= frame.size || frame[offset] != SBC_SYNCWORD) return null
-        // For now, we primarily need encoding for TX. Decode is a future enhancement.
-        // The radio sends us SBC audio which we'd decode for RX monitoring.
-        return null
+        if (offset >= frame.size) return null
+        // Find SBC syncword
+        var pos = offset
+        while (pos < frame.size && frame[pos] != SBC_SYNCWORD) pos++
+        if (pos >= frame.size) return null
+
+        val reader = ByteArrayBitReader(frame, pos)
+
+        // Header: syncword(8) + frequency(2) + blocks(2) + mode(2) + alloc(1) + subbands(1) + bitpool(8)
+        val sync = reader.read(8)
+        if (sync != 0x9C) return null
+        val freq = reader.read(2)
+        val blocksCode = reader.read(2)
+        val mode = reader.read(2)
+        val alloc = reader.read(1)
+        val subbandsCode = reader.read(1)
+        val bitpool = reader.read(8)
+
+        val nBlocks = when (blocksCode) { 0 -> 4; 1 -> 8; 2 -> 12; else -> 16 }
+        val nSubbands = if (subbandsCode == 0) 4 else 8
+
+        // Skip CRC
+        reader.read(8)
+
+        // Scale factors
+        val scaleFactor = IntArray(nSubbands) { reader.read(4) }
+
+        // Bit allocation
+        val bits = loudnessBitAllocation(scaleFactor, bitpool)
+
+        // Dequantize
+        val sbSamples = Array(nBlocks) { blk ->
+            DoubleArray(nSubbands) { sb ->
+                if (bits[sb] > 0) {
+                    val raw = reader.read(bits[sb])
+                    val levels = (1 shl bits[sb]) - 1
+                    val normalized = (raw.toDouble() / levels) * 2.0 - 1.0
+                    normalized * (1 shl scaleFactor[sb]).toDouble()
+                } else 0.0
+            }
+        }
+
+        // Synthesis filter bank → PCM
+        val pcm = ShortArray(nBlocks * nSubbands)
+        for (blk in 0 until nBlocks) {
+            // Shift synthesis buffer
+            for (i in 159 downTo nSubbands) {
+                synthesisBuffer[i] = synthesisBuffer[i - nSubbands]
+            }
+            // Matrixing: multiply subband samples by synthesis filter
+            for (i in 0 until nSubbands) {
+                var sum = 0.0
+                for (sb in 0 until nSubbands) {
+                    sum += synthesisFilter[sb][i] * sbSamples[blk][sb]
+                }
+                synthesisBuffer[i] = sum
+            }
+            // Windowing + output
+            for (i in 0 until nSubbands) {
+                var sum = 0.0
+                for (j in 0 until 10) {
+                    val idx = j * nSubbands * 2 + i
+                    if (idx < synthesisBuffer.size && idx < protoCoeffs8.size) {
+                        sum += synthesisBuffer[idx] * protoCoeffs8[idx]
+                    }
+                }
+                val sample = (sum / 32768.0).coerceIn(-1.0, 1.0)
+                pcm[blk * nSubbands + i] = (sample * 32767).toInt().toShort()
+            }
+        }
+
+        return pcm
+    }
+
+    private class ByteArrayBitReader(private val data: ByteArray, startOffset: Int) {
+        var bitPos: Int = startOffset * 8
+
+        fun read(numBits: Int): Int {
+            var result = 0
+            for (i in 0 until numBits) {
+                val byteIdx = bitPos / 8
+                val bitIdx = 7 - (bitPos % 8)
+                if (byteIdx < data.size) {
+                    result = (result shl 1) or ((data[byteIdx].toInt() shr bitIdx) and 1)
+                } else {
+                    result = result shl 1
+                }
+                bitPos++
+            }
+            return result
+        }
     }
 
     private fun loudnessBitAllocation(sf: IntArray, bitpool: Int): IntArray {
