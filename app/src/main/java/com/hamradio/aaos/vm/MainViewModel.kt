@@ -210,12 +210,14 @@ class MainViewModel @Inject constructor(
     fun selectChannelA(channelId: Int) = radio.setChannelA(channelId)
     fun selectChannelB(channelId: Int) = radio.setChannelB(channelId)
 
+    // Track which slot the radio is on (toggled by DO_PROG_FUNC)
+    private var radioActiveSlot = "A"
+
     /** Switch the radio's active A/B slot via DO_PROG_FUNC(TOGGLE_AB_CH). */
     fun setActiveSlot(slot: String) {
-        // Only toggle if switching to the non-active slot
-        val currentSlot = if (settings.value?.vfoX == 1) "B" else "A"
-        if (slot != currentSlot) {
+        if (slot != radioActiveSlot) {
             radio.sendRaw(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_AB_CH))
+            radioActiveSlot = slot
         }
     }
 
