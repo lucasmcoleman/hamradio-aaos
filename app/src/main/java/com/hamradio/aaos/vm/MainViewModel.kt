@@ -46,6 +46,12 @@ class MainViewModel @Inject constructor(
     val deviceInfo:      StateFlow<DeviceInfo?>     = radio.deviceInfo
     val messageLog:      StateFlow<List<LogEntry>>  = radio.messageLog
     val aprsPackets:     StateFlow<List<com.hamradio.aaos.radio.protocol.AprsPacket>> = radio.aprsPackets
+    val position:        StateFlow<com.hamradio.aaos.radio.protocol.RadioPosition> = radio.position
+
+    /** Smart beaconing config. */
+    private val _smartBeaconEnabled = MutableStateFlow(false)
+    val smartBeaconEnabled: StateFlow<Boolean> = _smartBeaconEnabled.asStateFlow()
+    fun setSmartBeaconEnabled(enabled: Boolean) { _smartBeaconEnabled.value = enabled }
 
     /** True when mock transport is active. */
     val isMockMode: Boolean get() = prefs.useMockRadio

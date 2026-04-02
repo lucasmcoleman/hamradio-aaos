@@ -15,6 +15,7 @@ import com.hamradio.aaos.radio.protocol.DeviceInfo
 import com.hamradio.aaos.radio.protocol.HtStatus
 import com.hamradio.aaos.radio.protocol.RadioCommands
 import com.hamradio.aaos.radio.protocol.RadioNotification
+import com.hamradio.aaos.radio.protocol.RadioPosition
 import com.hamradio.aaos.radio.protocol.RadioSettings
 import com.hamradio.aaos.radio.protocol.TncDataFragment
 import com.hamradio.aaos.radio.protocol.ReplyStatus
@@ -85,6 +86,9 @@ class RadioController @Inject constructor(
 
     private val _batteryPercent  = MutableStateFlow(-1)
     val batteryPercent: StateFlow<Int> = _batteryPercent.asStateFlow()
+
+    private val _position = MutableStateFlow(RadioPosition())
+    val position: StateFlow<RadioPosition> = _position.asStateFlow()
 
     /** One-shot error events for UI snackbar display. */
     private val _errorEvent = MutableSharedFlow<String>(extraBufferCapacity = 8)
@@ -395,6 +399,9 @@ class RadioController @Inject constructor(
                     _batteryPercent.value = value.coerceIn(0, 100)
                 }
             }
+            BasicCommand.GET_POSITION -> {
+                RadioPosition.decode(payload)?.let { _position.value = it }
+            }
         }
     }
 
@@ -421,6 +428,7 @@ class RadioController @Inject constructor(
             RadioNotification.HT_SETTINGS_CHANGED  -> sendCmd(RadioCommands.getSettings())
             RadioNotification.BSS_SETTINGS_CHANGED -> sendCmd(RadioCommands.getBssSettings())
             RadioNotification.RADIO_STATUS_CHANGED -> sendCmd(RadioCommands.getHtStatus())
+            RadioNotification.POSITION_CHANGE      -> RadioPosition.decode(data)?.let { _position.value = it }
             RadioNotification.DATA_RXD             -> handleDataRxd(data)
             else -> Unit
         }
