@@ -163,19 +163,19 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(Background)
-            .padding(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         // ----------------------------------------------------------------
-        // Left panel — status + signal
+        // Left panel — status + signal (proportional width)
         // ----------------------------------------------------------------
         Column(
             modifier  = Modifier
-                .width(220.dp)
+                .weight(0.3f)
                 .fillMaxHeight()
                 .clip(RoundedCornerShape(16.dp))
                 .background(SurfaceCard)
-                .padding(16.dp),
+                .padding(12.dp),
             verticalArrangement = Arrangement.SpaceBetween,
         ) {
             // Top: connection + mock badge

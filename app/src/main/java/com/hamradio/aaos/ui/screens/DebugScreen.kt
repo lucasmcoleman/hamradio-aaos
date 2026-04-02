@@ -125,7 +125,7 @@ fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
         // ----------------------------------------------------------------
         Column(
             modifier = Modifier
-                .width(280.dp)
+                .weight(0.35f)
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
