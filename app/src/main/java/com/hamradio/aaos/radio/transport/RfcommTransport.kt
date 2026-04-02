@@ -69,6 +69,12 @@ class RfcommTransport(
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
         try {
+            // Clean up any previous connection
+            readJob?.cancel()
+            readJob = null
+            closeSocket()
+            receiveBuffer.reset()
+
             _state.value = ConnectionState.CONNECTING
 
             val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -227,9 +233,29 @@ class RfcommTransport(
     // -----------------------------------------------------------------------
 
     private fun handleDisconnect() {
-        if (_state.value == ConnectionState.CONNECTED) {
+        if (_state.value == ConnectionState.CONNECTED || _state.value == ConnectionState.CONNECTING) {
             _state.value = ConnectionState.ERROR
             closeSocket()
+            // Start auto-reconnect
+            scope.launch { autoReconnect() }
+        }
+    }
+
+    private suspend fun autoReconnect() {
+        Log.i(TAG, "Auto-reconnect started")
+        while (scope.isActive && _state.value == ConnectionState.ERROR) {
+            delay(5000)
+            if (_state.value != ConnectionState.ERROR) break
+            Log.i(TAG, "Attempting reconnect to $deviceAddress")
+            try {
+                connect()
+                if (_state.value == ConnectionState.CONNECTED) {
+                    Log.i(TAG, "Reconnected successfully")
+                    break
+                }
+            } catch (e: Exception) {
+                Log.d(TAG, "Reconnect attempt failed: ${e.message}")
+            }
         }
     }
 
