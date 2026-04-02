@@ -184,7 +184,7 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
         SettingsGroup("Audio Levels") {
             CyclableSettingRow(
                 label = "Local Speaker",
-                value = when (s.localSpeaker) { 0 -> "Off"; 1 -> "Low"; 2 -> "Medium"; else -> "High" },
+                value = when (s.localSpeaker) { 0 -> "Normal"; 1 -> "Low"; 2 -> "Mute"; else -> "High" },
                 onCycle = { vm.updateSettings { it.copy(localSpeaker = (it.localSpeaker + 1) % 4) } },
             )
             SettingRow("Mic Gain") {
@@ -323,7 +323,7 @@ private fun LevelSlider(value: Int, max: Int, onValue: (Int) -> Unit) {
         Slider(
             value         = pos,
             onValueChange = { pos = it },
-            onValueChangeFinished = { onValue(pos.toInt()) },
+            onValueChangeFinished = { onValue(Math.round(pos)) },
             valueRange    = 0f..max.toFloat(),
             steps         = max - 1,
             modifier      = Modifier.width(140.dp),
@@ -334,7 +334,7 @@ private fun LevelSlider(value: Int, max: Int, onValue: (Int) -> Unit) {
             ),
         )
         Text(
-            text  = pos.toInt().toString(),
+            text  = Math.round(pos).toString(),
             style = MaterialTheme.typography.labelLarge,
             color = Accent,
         )

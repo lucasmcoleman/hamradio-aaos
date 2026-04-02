@@ -158,7 +158,10 @@ class RadioController @Inject constructor(
 
     fun setVolume(level: Int) = sendCmd(RadioCommands.setVolume(level))
 
-    fun setScan(enable: Boolean) = sendCmd(RadioCommands.setScan(enable))
+    fun setScan(enable: Boolean) {
+        // Use DO_PROG_FUNC toggle — SET_IN_SCAN doesn't work on DB50-B
+        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN))
+    }
 
     fun setChannelA(channelId: Int) {
         val current = _settings.value ?: return
@@ -176,23 +179,14 @@ class RadioController @Inject constructor(
 
     fun pttDown() {
         requestAudioFocus()
-        val channel = audioChannel
-        if (channel != null && channel.isConnected.value) {
-            channel.startTransmit()
-            Log.i(TAG, "PTT DOWN via audio channel")
-        } else {
-            Log.w(TAG, "PTT DOWN: audio channel not connected")
-            _errorEvent.tryEmit("Audio channel not connected — PTT unavailable")
-        }
+        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT))
+        Log.i(TAG, "PTT DOWN via DO_PROG_FUNC")
     }
 
     fun pttUp() {
-        val channel = audioChannel
-        if (channel != null) {
-            channel.stopTransmit()
-            Log.i(TAG, "PTT UP via audio channel")
-        }
+        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT))
         abandonAudioFocus()
+        Log.i(TAG, "PTT UP via DO_PROG_FUNC")
     }
 
     private fun requestAudioFocus() {
