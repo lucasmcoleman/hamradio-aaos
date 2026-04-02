@@ -130,6 +130,22 @@ class RadioController @Inject constructor(
                 Log.e(TAG, "Connect failed", e)
             }
         }
+
+        // Watch for reconnects — re-initialize when transport recovers from ERROR
+        scope.launch {
+            var wasError = false
+            transport.connectionState.collect { state ->
+                if (state == ConnectionState.ERROR) {
+                    wasError = true
+                } else if (state == ConnectionState.CONNECTED && wasError) {
+                    wasError = false
+                    Log.i(TAG, "Transport reconnected — re-initializing radio")
+                    startCollecting()
+                    withTimeoutOrNull(10_000L) { initializeRadio() }
+                    connectAudioChannel()
+                }
+            }
+        }
     }
 
     private suspend fun connectAudioChannel() {

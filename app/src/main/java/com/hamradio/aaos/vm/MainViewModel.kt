@@ -5,6 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.hamradio.aaos.di.RadioPrefs
 import com.hamradio.aaos.radio.LogEntry
 import com.hamradio.aaos.radio.RadioController
+import com.hamradio.aaos.radio.SmartBeacon
+import com.hamradio.aaos.radio.SmartBeaconConfig
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import com.hamradio.aaos.radio.protocol.BssSettings
 import com.hamradio.aaos.radio.protocol.DeviceInfo
@@ -111,6 +113,28 @@ class MainViewModel @Inject constructor(
                 if (s != null) {
                     if (s.vfo1ModFreqHz > 0) _vfoA.value = _vfoA.value.copy(freqHz = s.vfo1ModFreqHz)
                     if (s.vfo2ModFreqHz > 0) _vfoB.value = _vfoB.value.copy(freqHz = s.vfo2ModFreqHz)
+                }
+            }
+        }
+
+        // Smart beaconing — dynamically adjust beacon interval based on GPS speed
+        viewModelScope.launch {
+            val config = SmartBeaconConfig(enabled = true)
+            var lastIntervalSent = -1
+            while (true) {
+                kotlinx.coroutines.delay(5000) // check every 5 seconds
+                if (!_smartBeaconEnabled.value) continue
+                val pos = position.value
+                if (!pos.locked) continue
+                val interval = SmartBeacon.computeInterval(pos, config)
+                if (interval == 0) {
+                    // Immediate beacon — set shortest interval momentarily
+                    radio.updateBssSettings { it.copy(locationShareIntervalSec = 10) }
+                    SmartBeacon.markBeaconSent()
+                    lastIntervalSent = 10
+                } else if (interval > 0 && interval != lastIntervalSent) {
+                    radio.updateBssSettings { it.copy(locationShareIntervalSec = interval) }
+                    lastIntervalSent = interval
                 }
             }
         }
