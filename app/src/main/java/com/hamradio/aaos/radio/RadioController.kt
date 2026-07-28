@@ -116,6 +116,8 @@ class RadioController @Inject constructor(
     // Connection lifecycle
     // -----------------------------------------------------------------------
 
+    private var reconnectWatchJob: Job? = null
+
     fun connect() {
         scope.launch {
             try {
@@ -131,18 +133,21 @@ class RadioController @Inject constructor(
             }
         }
 
-        // Watch for reconnects — re-initialize when transport recovers from ERROR
-        scope.launch {
-            var wasError = false
-            transport.connectionState.collect { state ->
-                if (state == ConnectionState.ERROR) {
-                    wasError = true
-                } else if (state == ConnectionState.CONNECTED && wasError) {
-                    wasError = false
-                    Log.i(TAG, "Transport reconnected — re-initializing radio")
-                    startCollecting()
-                    withTimeoutOrNull(10_000L) { initializeRadio() }
-                    connectAudioChannel()
+        // Watch for reconnects — re-initialize when transport recovers from ERROR.
+        // Single watcher only: connect() can be called repeatedly (retry button).
+        if (reconnectWatchJob?.isActive != true) {
+            reconnectWatchJob = scope.launch {
+                var wasError = false
+                transport.connectionState.collect { state ->
+                    if (state == ConnectionState.ERROR) {
+                        wasError = true
+                    } else if (state == ConnectionState.CONNECTED && wasError) {
+                        wasError = false
+                        Log.i(TAG, "Transport reconnected — re-initializing radio")
+                        startCollecting()
+                        withTimeoutOrNull(10_000L) { initializeRadio() }
+                        connectAudioChannel()
+                    }
                 }
             }
         }
@@ -179,8 +184,12 @@ class RadioController @Inject constructor(
     fun setVolume(level: Int) = sendCmd(RadioCommands.setVolume(level))
 
     fun setScan(enable: Boolean) {
-        // Use DO_PROG_FUNC toggle — SET_IN_SCAN doesn't work on DB50-B
-        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN))
+        // Use DO_PROG_FUNC toggle — SET_IN_SCAN doesn't work on DB50-B.
+        // Only toggle when the radio's state differs from the requested one,
+        // otherwise a stale UI switch would invert the actual scan state.
+        if (_htStatus.value.isScan != enable) {
+            sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN))
+        }
     }
 
     fun setChannelA(channelId: Int) {
@@ -196,6 +205,9 @@ class RadioController @Inject constructor(
     }
 
     fun setHtPower(on: Boolean) = sendCmd(RadioCommands.setHtOnOff(on))
+
+    /** Trigger an immediate APRS/BSS location beacon (no settings write). */
+    fun sendBeaconNow() = sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_SEND_LOCATION))
 
     fun pttDown() {
         requestAudioFocus()
@@ -277,10 +289,11 @@ class RadioController @Inject constructor(
     }
 
     fun refreshChannels() {
-        val count = _deviceInfo.value?.channelCount ?: 16
+        val count = (_deviceInfo.value?.channelCount ?: 16).coerceAtMost(MAX_CHANNELS)
         scope.launch {
             for (i in 0 until count) {
                 transport.send(RadioCommands.readChannel(i))
+                delay(50)  // space out commands for real hardware
             }
         }
     }
@@ -368,6 +381,8 @@ class RadioController @Inject constructor(
             if (cmdLabel != null) {
                 _errorEvent.tryEmit("$cmdLabel rejected: $status")
             }
+            // Error replies carry no valid payload — don't parse them as data
+            return
         }
         val payload = if (body.size > 1) body.copyOfRange(1, body.size) else ByteArray(0)
 
@@ -380,6 +395,7 @@ class RadioController @Inject constructor(
                     scope.launch {
                         for (i in 0 until info.channelCount.coerceAtMost(MAX_CHANNELS)) {
                             transport.send(RadioCommands.readChannel(i))
+                            delay(50)  // space out commands for real hardware
                         }
                     }
                 }
@@ -487,6 +503,7 @@ class RadioController @Inject constructor(
     // -----------------------------------------------------------------------
 
     private fun sendCmd(msg: BenshiMessage) {
+        appendLog(msg, LogDir.OUT)
         scope.launch {
             try {
                 withTimeoutOrNull(5_000L) { transport.send(msg) }
@@ -501,9 +518,9 @@ class RadioController @Inject constructor(
         sendCmd(RadioCommands.storeSettings())
     }
 
-    private fun appendLog(msg: BenshiMessage) {
+    private fun appendLog(msg: BenshiMessage, direction: LogDir = LogDir.IN) {
         val entry = LogEntry(
-            direction  = if (msg.isReply || msg.command == BasicCommand.EVENT_NOTIFICATION) LogDir.IN else LogDir.OUT,
+            direction  = direction,
             command    = msg.command,
             isReply    = msg.isReply,
             bodyHex    = msg.body.toHexString(),

@@ -115,13 +115,19 @@ object GaiaFrame {
             for (i in offset + 1 until buf.size) {
                 if (buf[i] == SYNC) return Pair(-(i - offset), null)
             }
-            return Pair(-(remaining - 1), null)
+            // no sync anywhere — discard everything
+            return Pair(-remaining, null)
         }
         val flags      = buf[offset + 2].toInt() and 0xFF
         val payloadLen = buf[offset + 3].toInt() and 0xFF
         val hasChecksum = (flags and FLAG_CHECKSUM) != 0
         val totalLen   = 4 + 4 + payloadLen + (if (hasChecksum) 1 else 0)
         if (remaining < totalLen) return Pair(0, null)
+        if (hasChecksum) {
+            var cs = 0
+            for (i in offset + 1 until offset + totalLen - 1) cs = cs xor (buf[i].toInt() and 0xFF)
+            if (cs.toByte() != buf[offset + totalLen - 1]) return Pair(totalLen, null)
+        }
         val msgBytes = buf.copyOfRange(offset + 4, offset + 4 + 4 + payloadLen)
         val msg = BenshiMessage.decode(msgBytes) ?: return Pair(totalLen, null)
         return Pair(totalLen, msg)

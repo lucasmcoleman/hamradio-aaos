@@ -58,6 +58,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -918,6 +919,10 @@ private fun PttButton(
     val bgColor = if (isTransmitting) TxRed else TxRedDim
     val textColor = if (isTransmitting) Color.White else TxRed
 
+    // pointerInput(toggleMode) only restarts when toggleMode changes, so the
+    // gesture lambda would otherwise capture a stale isTransmitting forever.
+    val transmitting by rememberUpdatedState(isTransmitting)
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -929,7 +934,7 @@ private fun PttButton(
                     // Tap on / tap off
                     detectTapGestures(
                         onTap = {
-                            if (isTransmitting) onPttUp() else onPttDown()
+                            if (transmitting) onPttUp() else onPttDown()
                         },
                     )
                 } else {
