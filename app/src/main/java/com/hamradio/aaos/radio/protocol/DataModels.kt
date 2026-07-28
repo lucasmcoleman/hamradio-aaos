@@ -702,7 +702,12 @@ data class AprsPacket(
     val info: String,
     val latitude: Double?,
     val longitude: Double?,
+    val receivedAtMs: Long = System.currentTimeMillis(),
 ) {
+    /** "N0CALL-9" or just "N0CALL" when SSID is 0. */
+    val displayCallsign: String
+        get() = if (sourceSsid > 0) "$source-$sourceSsid" else source
+
     companion object {
         /** Decode a raw AX.25 frame (after TNC fragment reassembly). */
         fun decode(raw: ByteArray): AprsPacket? {
