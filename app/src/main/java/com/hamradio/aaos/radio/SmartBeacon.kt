@@ -79,6 +79,15 @@ object SmartBeacon {
         return max(config.fastInterval, min(config.slowInterval, interval))
     }
 
+    /**
+     * Snap an interval to a coarse step so slider-like speed changes don't
+     * rewrite radio settings (a flash write) on every check.
+     */
+    private val INTERVAL_STEPS = intArrayOf(90, 180, 300, 600, 900, 1800)
+
+    fun quantizeInterval(seconds: Int): Int =
+        INTERVAL_STEPS.minByOrNull { abs(it - seconds) } ?: seconds
+
     fun markBeaconSent() {
         lastBeaconTime = System.currentTimeMillis() / 1000
     }

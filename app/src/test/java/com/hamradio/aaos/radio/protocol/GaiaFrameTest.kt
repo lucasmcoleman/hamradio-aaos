@@ -77,4 +77,21 @@ class GaiaFrameTest {
         // Should return negative = skip 2 bytes to reach 0xFF sync
         assert(consumed < 0)
     }
+
+    @Test
+    fun `decode rejects frame with corrupted checksum`() {
+        val frame = GaiaFrame.encode(testMsg, withChecksum = true)
+        frame[frame.size - 1] = (frame[frame.size - 1].toInt() xor 0xFF).toByte()
+        val (consumed, decoded) = GaiaFrame.decode(frame)
+        assertEquals(frame.size, consumed)  // corrupt frame is consumed…
+        assertNull(decoded)                 // …but yields no message
+    }
+
+    @Test
+    fun `decode consumes all bytes when no sync byte exists`() {
+        val garbage = ByteArray(16) { 0x42 }
+        val (consumed, decoded) = GaiaFrame.decode(garbage)
+        assertEquals(-garbage.size, consumed)
+        assertNull(decoded)
+    }
 }

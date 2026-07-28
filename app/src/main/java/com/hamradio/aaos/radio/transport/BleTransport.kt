@@ -11,11 +11,13 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.hamradio.aaos.radio.protocol.BenshiMessage
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,9 +51,13 @@ class BleTransport(
 
     private var gatt: BluetoothGatt? = null
     private var writeCharacteristic: BluetoothGattCharacteristic? = null
-    private val sendChannel = Channel<ByteArray>(Channel.BUFFERED)
+    private var sendChannel = Channel<ByteArray>(Channel.BUFFERED)
     private var sendJob: Job? = null
     private val receiveBuffer = ByteArrayOutputStream()
+    /** Completed by onCharacteristicWrite — GATT allows only one write in flight. */
+    private var writeAck: CompletableDeferred<Boolean>? = null
+    /** True while disconnect() is running, so the GATT callback reports DISCONNECTED not ERROR. */
+    @Volatile private var intentionalDisconnect = false
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState = _connectionState.asStateFlow()
@@ -72,8 +78,12 @@ class BleTransport(
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     Log.d(TAG, "GATT disconnected (status=$status)")
-                    _connectionState.value = ConnectionState.DISCONNECTED
                     writeCharacteristic = null
+                    writeAck?.complete(false)
+                    // An unrequested drop is an error — lets reconnect logic engage
+                    _connectionState.value =
+                        if (intentionalDisconnect) ConnectionState.DISCONNECTED
+                        else ConnectionState.ERROR
                 }
             }
         }
@@ -135,6 +145,14 @@ class BleTransport(
             }
         }
 
+        override fun onCharacteristicWrite(
+            gatt: BluetoothGatt,
+            characteristic: BluetoothGattCharacteristic,
+            status: Int,
+        ) {
+            writeAck?.complete(status == BluetoothGatt.GATT_SUCCESS)
+        }
+
         override fun onCharacteristicChanged(
             gatt: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic,
@@ -172,6 +190,10 @@ class BleTransport(
     }
 
     override suspend fun connect() = withContext(Dispatchers.IO) {
+        intentionalDisconnect = false
+        // The previous channel may have been closed by disconnect() — start fresh
+        sendChannel.close()
+        sendChannel = Channel(Channel.BUFFERED)
         _connectionState.value = ConnectionState.SCANNING
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
         val device = adapter.getRemoteDevice(deviceAddress)
@@ -184,8 +206,10 @@ class BleTransport(
     }
 
     override suspend fun disconnect() = withContext(Dispatchers.IO) {
+        intentionalDisconnect = true
         sendJob?.cancel()
         sendChannel.close()
+        writeAck?.complete(false)
         gatt?.disconnect()
         gatt?.close()
         gatt = null
@@ -200,16 +224,28 @@ class BleTransport(
             val g = gatt
             if (char == null || g == null) {
                 Log.w(TAG, "GATT or characteristic null, dropping message")
-            } else {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-                } else {
-                    @Suppress("DEPRECATION")
-                    char.value = bytes
-                    @Suppress("DEPRECATION")
-                    g.writeCharacteristic(char)
-                }
+                continue
             }
+            // GATT permits a single outstanding write; issuing another before
+            // onCharacteristicWrite fires silently drops it.
+            val ack = CompletableDeferred<Boolean>()
+            writeAck = ack
+            val issued = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) ==
+                    android.bluetooth.BluetoothStatusCodes.SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                char.value = bytes
+                @Suppress("DEPRECATION")
+                g.writeCharacteristic(char)
+            }
+            if (issued) {
+                val ok = withTimeoutOrNull(2_000L) { ack.await() } ?: false
+                if (!ok) Log.w(TAG, "GATT write failed or timed out")
+            } else {
+                Log.w(TAG, "GATT write could not be issued")
+            }
+            writeAck = null
         }
     }
 }
