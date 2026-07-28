@@ -68,6 +68,52 @@ class DataModelsTest {
         assertEquals(0, SubAudio.None.toRaw())
     }
 
+    @Test
+    fun `SubAudio CTCSS tones with inexact float representations round correctly`() {
+        // 79.7f * 100 = 7969.9997 in float math — must round to 7970, not truncate to 7969
+        assertEquals(7970,  SubAudio.Ctcss(79.7f).toRaw())
+        assertEquals(6930,  SubAudio.Ctcss(69.3f).toRaw())
+        assertEquals(14130, SubAudio.Ctcss(141.3f).toRaw())
+        assertEquals(25410, SubAudio.Ctcss(254.1f).toRaw())
+        // Every standard tone must survive an encode/decode round-trip
+        val standardTones = listOf(
+            67.0f, 69.3f, 71.9f, 74.4f, 77.0f, 79.7f, 82.5f, 85.4f, 88.5f, 91.5f,
+            94.8f, 97.4f, 100.0f, 103.5f, 107.2f, 110.9f, 114.8f, 118.8f, 123.0f,
+            127.3f, 131.8f, 136.5f, 141.3f, 146.2f, 151.4f, 156.7f, 159.8f, 162.2f,
+            165.5f, 167.9f, 171.3f, 173.8f, 177.3f, 179.9f, 183.5f, 186.2f, 189.9f,
+            192.8f, 196.6f, 199.5f, 203.5f, 206.5f, 210.7f, 218.1f, 225.7f, 229.1f,
+            233.6f, 241.8f, 250.3f, 254.1f,
+        )
+        for (hz in standardTones) {
+            val decoded = SubAudio.Ctcss(hz).toRaw().toSubAudio() as SubAudio.Ctcss
+            assertEquals("tone $hz", hz, decoded.hz, 0.001f)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RadioPosition
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `RadioPosition decodes 24-bit lat lon and extended fields`() {
+        val latRaw = (37.7749 * 60 * 500).toInt()
+        val lonRaw = (-122.4194 * 60 * 500).toInt() and 0xFFFFFF
+        val bytes = ByteArray(18)
+        bytes[0] = (latRaw shr 16).toByte(); bytes[1] = (latRaw shr 8).toByte(); bytes[2] = latRaw.toByte()
+        bytes[3] = (lonRaw shr 16).toByte(); bytes[4] = (lonRaw shr 8).toByte(); bytes[5] = lonRaw.toByte()
+        putShort(bytes, 6, 52)     // altitude
+        putShort(bytes, 8, 35)     // speed knots
+        putShort(bytes, 10, 270)   // heading
+
+        val pos = RadioPosition.decode(bytes)!!
+        assertEquals(37.7749, pos.latitude, 0.001)
+        assertEquals(-122.4194, pos.longitude, 0.001)
+        assertEquals(52, pos.altitudeMeters)
+        assertEquals(35, pos.speedKnots)
+        assertEquals(270, pos.headingDegrees)
+        assertEquals(true, pos.locked)
+    }
+
     // -----------------------------------------------------------------------
     // RfChannel encode/decode
     // -----------------------------------------------------------------------
@@ -112,6 +158,41 @@ class DataModelsTest {
         val ch = RfChannel(0, "SIMP", 146_520_000, 146_520_000)
         val d  = RfChannel.decode(RfChannel.encode(ch))!!
         assertEquals(d.txFreqHz, d.rxFreqHz)
+    }
+
+    // -----------------------------------------------------------------------
+    // RadioSettings
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun `RadioSettings encode then decode round-trips including split-nibble channels`() {
+        val s = RadioSettings(
+            channelA = 18,        // > 15: exercises the split upper/lower nibble encoding
+            channelB = 33,
+            scan = true,
+            doubleChannel = 2,
+            squelchLevel = 6,
+            micGain = 5,
+            localSpeaker = 2,
+            btMicGain = 3,
+            vfoX = 1,
+            vfo1TxPower = 2,
+            vfo1ModFreqHz = 146_520_000L,
+            vfo2ModFreqHz = 446_000_000L,
+        )
+        val d = RadioSettings.decode(s.patchRawData())!!
+        assertEquals(18, d.channelA)
+        assertEquals(33, d.channelB)
+        assertEquals(true, d.scan)
+        assertEquals(2, d.doubleChannel)
+        assertEquals(6, d.squelchLevel)
+        assertEquals(5, d.micGain)
+        assertEquals(2, d.localSpeaker)
+        assertEquals(3, d.btMicGain)
+        assertEquals(1, d.vfoX)
+        assertEquals(2, d.vfo1TxPower)
+        assertEquals(146_520_000L, d.vfo1ModFreqHz)
+        assertEquals(446_000_000L, d.vfo2ModFreqHz)
     }
 
     // -----------------------------------------------------------------------

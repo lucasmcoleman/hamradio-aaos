@@ -96,13 +96,16 @@ class MainViewModel @Inject constructor(
         _pttToggleMode.value = enabled
     }
 
-    /** Apply RX audio routing to radio settings (localSpeaker based on route). */
+    /**
+     * Apply RX audio routing to radio settings.
+     * localSpeaker semantics (hardware-tested on DB50-B): 0-1 = speaker ON, 2-3 = speaker OFF.
+     */
     private fun applyAudioRouting() {
         val rxRoute = prefs.rxAudioRoute
         when (rxRoute) {
-            0 -> radio.updateSettings { it.copy(localSpeaker = 2) }  // Radio only: speaker on
-            1 -> radio.updateSettings { it.copy(localSpeaker = 0) }  // Vehicle only: speaker off (HFP)
-            2 -> radio.updateSettings { it.copy(localSpeaker = 2) }  // Both: speaker on + HFP
+            0 -> radio.updateSettings { it.copy(localSpeaker = 0) }  // Radio only: speaker on
+            1 -> radio.updateSettings { it.copy(localSpeaker = 2) }  // Vehicle only: speaker off (BT audio)
+            2 -> radio.updateSettings { it.copy(localSpeaker = 0) }  // Both: speaker on + BT audio
         }
     }
 
@@ -117,7 +120,10 @@ class MainViewModel @Inject constructor(
             }
         }
 
-        // Smart beaconing — dynamically adjust beacon interval based on GPS speed
+        // Smart beaconing — dynamically adjust beacon interval based on GPS speed.
+        // Intervals are quantized to coarse steps so we only rewrite radio
+        // settings (a flash write) when the step actually changes; turn-triggered
+        // beacons go out immediately via PF_SEND_LOCATION with no settings write.
         viewModelScope.launch {
             val config = SmartBeaconConfig(enabled = true)
             var lastIntervalSent = -1
@@ -128,13 +134,14 @@ class MainViewModel @Inject constructor(
                 if (!pos.locked) continue
                 val interval = SmartBeacon.computeInterval(pos, config)
                 if (interval == 0) {
-                    // Immediate beacon — set shortest interval momentarily
-                    radio.updateBssSettings { it.copy(locationShareIntervalSec = 10) }
+                    radio.sendBeaconNow()
                     SmartBeacon.markBeaconSent()
-                    lastIntervalSent = 10
-                } else if (interval > 0 && interval != lastIntervalSent) {
-                    radio.updateBssSettings { it.copy(locationShareIntervalSec = interval) }
-                    lastIntervalSent = interval
+                } else if (interval > 0) {
+                    val stepped = SmartBeacon.quantizeInterval(interval)
+                    if (stepped != lastIntervalSent) {
+                        radio.updateBssSettings { it.copy(locationShareIntervalSec = stepped) }
+                        lastIntervalSent = stepped
+                    }
                 }
             }
         }

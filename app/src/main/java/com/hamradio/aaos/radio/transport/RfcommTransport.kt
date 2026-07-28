@@ -114,6 +114,8 @@ class RfcommTransport(
             Log.e(TAG, "RFCOMM connect failed: ${e.message}")
             closeSocket()
             _state.value = ConnectionState.ERROR
+            // Keep retrying — the radio may simply not be powered on yet
+            startAutoReconnect()
         } catch (e: SecurityException) {
             Log.e(TAG, "Missing Bluetooth permission", e)
             _state.value = ConnectionState.ERROR
@@ -135,6 +137,8 @@ class RfcommTransport(
     }
 
     override suspend fun disconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
         readJob?.cancel()
         readJob = null
         closeSocket()
@@ -232,13 +236,19 @@ class RfcommTransport(
     // Helpers
     // -----------------------------------------------------------------------
 
+    private var reconnectJob: Job? = null
+
     private fun handleDisconnect() {
         if (_state.value == ConnectionState.CONNECTED || _state.value == ConnectionState.CONNECTING) {
             _state.value = ConnectionState.ERROR
             closeSocket()
-            // Start auto-reconnect
-            scope.launch { autoReconnect() }
+            startAutoReconnect()
         }
+    }
+
+    private fun startAutoReconnect() {
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = scope.launch { autoReconnect() }
     }
 
     private suspend fun autoReconnect() {

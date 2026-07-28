@@ -239,14 +239,19 @@ class MockTransport(
     }
 
     private suspend fun replyPosition() {
-        // Latitude: 37.7749 N, Longitude: -122.4194 W (San Francisco)
-        val latRaw  = (37.7749  * 1_000_000).toInt()
-        val lonRaw  = (-122.4194 * 1_000_000).toInt()
-        val altRaw  = 52  // meters
-        val body = ByteArray(12)
-        putInt(body, 0, latRaw)
-        putInt(body, 4, lonRaw)
-        putInt(body, 8, altRaw)
+        // Latitude: 37.7749 N, Longitude: -122.4194 W (San Francisco).
+        // Wire format matches RadioPosition.decode: 24-bit lat/lon where
+        // raw = degrees * 60 * 500, then alt/speed/heading/timestamp/accuracy.
+        val latRaw = (37.7749 * 60 * 500).toInt()
+        val lonRaw = (-122.4194 * 60 * 500).toInt() and 0xFFFFFF
+        val body = ByteArray(18)
+        body[0] = (latRaw shr 16).toByte(); body[1] = (latRaw shr 8).toByte(); body[2] = latRaw.toByte()
+        body[3] = (lonRaw shr 16).toByte(); body[4] = (lonRaw shr 8).toByte(); body[5] = lonRaw.toByte()
+        putShort(body, 6, 52)                       // altitude m
+        putShort(body, 8, 35)                       // speed knots (~40 mph, exercises smart beacon)
+        putShort(body, 10, 270)                     // heading °
+        putInt(body, 12, (System.currentTimeMillis() / 1000).toInt())
+        putShort(body, 16, 5)                       // accuracy
         emit(BenshiMessage(CommandGroup.BASIC, BasicCommand.GET_POSITION, true, byteArrayOf(0x00) + body))
     }
 
@@ -297,17 +302,21 @@ class MockTransport(
 
     private suspend fun handleProgFunc(body: ByteArray) {
         if (body.size >= 2) {
-            // PF structure: byte0 = [buttonId(4)][action(4)], byte1 = [effect(8)]
-            val action = body[0].toInt() and 0x0F
+            // App sends [0x00, effectType] (see RadioCommands.doProgFunc) —
+            // effects behave as toggles, matching DB50-B behavior.
             val effect = body[1].toInt() and 0xFF
             when (effect) {
-                13, 14 -> { // MAIN_PTT, SUB_PTT
-                    isInTx = action == 1 // SHORT = start TX, LONG_RELEASE = stop TX
+                RadioCommands.PF_MAIN_PTT, RadioCommands.PF_SUB_PTT -> {
+                    isInTx = !isInTx
+                    if (isInTx) { isInRx = false; squelchOpen = false }
                 }
-                18 -> { // TOGGLE_AB_CH
+                RadioCommands.PF_TOGGLE_AB_CH -> {
                     val tmp = currentChannelA
                     currentChannelA = currentChannelB
                     currentChannelB = tmp
+                }
+                RadioCommands.PF_TOGGLE_CH_SCAN -> {
+                    isScanActive = !isScanActive
                 }
             }
         }

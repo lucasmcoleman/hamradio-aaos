@@ -1,5 +1,7 @@
 package com.hamradio.aaos.radio.protocol
 
+import kotlin.math.roundToInt
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -63,7 +65,8 @@ fun Int.toSubAudio(): SubAudio = when {
 fun SubAudio.toRaw(): Int = when (this) {
     is SubAudio.None    -> 0
     is SubAudio.Dcs     -> code
-    is SubAudio.Ctcss   -> (hz * 100).toInt()
+    // Round, don't truncate: 79.7f * 100 is 7969.9997 in float math
+    is SubAudio.Ctcss   -> (hz * 100).roundToInt()
 }
 
 // ---------------------------------------------------------------------------
