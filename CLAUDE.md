@@ -37,12 +37,12 @@ MainViewModel (StateFlow exposure, VFO state, preferences)
   ↓
 RadioController (@Singleton, command dispatch, debouncing, audio focus)
   ↓
-IRadioTransport (BleTransport | MockTransport | DisconnectedTransport)
+TransportManager (swappable: RfcommTransport | MockTransport | DisconnectedTransport)
   ↓
 Benshi Protocol (BenshiMessage encode/decode, GAIA framing for RFCOMM)
 ```
 
-**Transport is injected once by Hilt at startup.** Switching between mock/BLE requires app restart (Activity.recreate via restartEvent). DisconnectedTransport is used when no device address is configured.
+**The injected transport is a `TransportManager`** that owns a swappable inner transport (MockTransport | RfcommTransport | DisconnectedTransport, chosen from RadioPrefs) and re-emits its flows. Switching mock/real or changing device address happens at runtime via `RadioController.switchTransport()` — no app restart. DisconnectedTransport is used when no device address is configured.
 
 ## Protocol Layer
 
@@ -84,7 +84,7 @@ if (s == null) { Text("Loading") } else { /* full UI */ }
 ## State Management
 
 - **StateFlow** for observable state (channels, volume, connectionState)
-- **MutableSharedFlow** (no buffer) for one-shot events (errorEvent, restartEvent) — never use `extraBufferCapacity` for events that trigger `recreate()`
+- **MutableSharedFlow** for one-shot events (errorEvent) — never use `extraBufferCapacity` for events that trigger `recreate()`
 - **Preferences as StateFlow:** RadioPrefs values that affect UI (rxAudioRoute, pttToggleMode, etc.) are mirrored as MutableStateFlow in ViewModel for Compose observation
 - All Compose state collection uses `collectAsStateWithLifecycle()`, never conditionally
 

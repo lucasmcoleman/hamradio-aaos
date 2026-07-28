@@ -64,7 +64,7 @@ import java.util.Locale
 fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
     val log      by vm.messageLog.collectAsStateWithLifecycle()
     val devInfo  by vm.deviceInfo.collectAsStateWithLifecycle()
-    val isMock   = vm.isMockMode
+    val isMock   by vm.isMockMode.collectAsStateWithLifecycle()
 
     Row(
         modifier = Modifier

@@ -20,12 +20,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             HamRadioTheme {
-                // Auto-connect on launch
+                // Auto-connect on launch. Transport switches (mock ↔ real,
+                // new device) happen in place — no activity restart needed.
                 LaunchedEffect(Unit) { vm.connect() }
-                // Restart activity when transport mode changes
-                LaunchedEffect(Unit) {
-                    vm.restartEvent.collect { recreate() }
-                }
                 AppNavigation(vm = vm)
             }
         }

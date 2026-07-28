@@ -106,7 +106,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
     val channelA   by vm.activeChannelA.collectAsStateWithLifecycle()
     val channelB   by vm.activeChannelB.collectAsStateWithLifecycle()
     val volume     by vm.volume.collectAsStateWithLifecycle()
-    val isMock     = vm.isMockMode
+    val isMock     by vm.isMockMode.collectAsStateWithLifecycle()
     val isVfoA     by vm.isVfoModeA.collectAsStateWithLifecycle()
     val isVfoB     by vm.isVfoModeB.collectAsStateWithLifecycle()
     val vfoA       by vm.vfoA.collectAsStateWithLifecycle()
@@ -1023,7 +1023,7 @@ private fun ConnectionSheet(
     onDismiss: () -> Unit,
 ) {
     val connState by vm.connectionState.collectAsStateWithLifecycle()
-    val isMock = vm.isMockMode
+    val isMock by vm.isMockMode.collectAsStateWithLifecycle()
     var addressText by remember { mutableStateOf("") }
 
     ModalBottomSheet(

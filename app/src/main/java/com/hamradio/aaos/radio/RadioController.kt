@@ -154,7 +154,8 @@ class RadioController @Inject constructor(
     }
 
     private suspend fun connectAudioChannel() {
-        val addr = (transport as? com.hamradio.aaos.radio.transport.RfcommTransport)?.deviceAddress
+        val addr = (transport as? com.hamradio.aaos.radio.transport.TransportManager)?.rfcommDeviceAddress
+            ?: (transport as? com.hamradio.aaos.radio.transport.RfcommTransport)?.deviceAddress
             ?: return
         try {
             val channel = RadioAudioChannel(context, addr)
@@ -174,6 +175,27 @@ class RadioController @Inject constructor(
             _htStatus.value = HtStatus.DISCONNECTED
             _deviceInfo.value = null
             _channels.value = emptyList()
+        }
+    }
+
+    /**
+     * Swap the underlying transport (mock ↔ real, or new device address from
+     * prefs) and reconnect. No app restart required.
+     */
+    fun switchTransport() {
+        scope.launch {
+            collectJob?.cancelAndJoin()
+            audioChannel?.disconnect()
+            audioChannel = null
+            (transport as? com.hamradio.aaos.radio.transport.TransportManager)?.switchTransport()
+            _htStatus.value = HtStatus.DISCONNECTED
+            _deviceInfo.value = null
+            _settings.value = null
+            _bssSettings.value = null
+            _channels.value = emptyList()
+            _position.value = RadioPosition()
+            _batteryPercent.value = -1
+            connect()
         }
     }
 
@@ -208,6 +230,11 @@ class RadioController @Inject constructor(
 
     /** Trigger an immediate APRS/BSS location beacon (no settings write). */
     fun sendBeaconNow() = sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_SEND_LOCATION))
+
+    /** Surface a user-visible error through the snackbar event flow. */
+    fun reportError(message: String) {
+        _errorEvent.tryEmit(message)
+    }
 
     fun pttDown() {
         requestAudioFocus()
