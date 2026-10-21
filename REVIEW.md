@@ -1,5 +1,8 @@
 # Opus Code Review — Full Codebase Audit
 
+> **Historical (March 2026).** This was written against the first BLE-based version. Several of its bugs are fixed,
+> and real radios now use RfcommTransport. Don't use it as the current defect list.
+
 > Sonnet wrote the initial 37-file, 4300+ line implementation.
 > This document is the Opus review, identifying what works, what's broken,
 > and the exact fix sequence. Pick up from here in any environment.

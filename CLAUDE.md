@@ -37,12 +37,12 @@ MainViewModel (StateFlow exposure, VFO state, preferences)
   ↓
 RadioController (@Singleton, command dispatch, debouncing, audio focus)
   ↓
-IRadioTransport (BleTransport | MockTransport | DisconnectedTransport)
+IRadioTransport (RfcommTransport | MockTransport | DisconnectedTransport; BleTransport is unused)
   ↓
 Benshi Protocol (BenshiMessage encode/decode, GAIA framing for RFCOMM)
 ```
 
-**Transport is injected once by Hilt at startup.** Switching between mock/BLE requires app restart (Activity.recreate via restartEvent). DisconnectedTransport is used when no device address is configured.
+**Transport is injected once by Hilt at startup** as a process-wide `@Singleton`. `RadioModule` picks RfcommTransport for a configured device, MockTransport in mock mode, and DisconnectedTransport when no device address is set. Known defect: switching device or mock mode calls Activity.recreate via restartEvent, which does not re-inject the singleton, so the change only takes effect after the process restarts.
 
 ## Protocol Layer
 
@@ -75,7 +75,7 @@ val s = settings
 if (s == null) { Text("Loading") } else { /* full UI */ }
 ```
 
-**Settings write debouncing:** `updateSettings()` and `updateBssSettings()` use AtomicInteger generation counters with 500ms delay to avoid flooding BLE on slider drags. The pattern: optimistic UI update → increment gen → delay → check gen unchanged → send.
+**Settings write debouncing:** `updateSettings()` and `updateBssSettings()` use AtomicInteger generation counters with 500ms delay to avoid flooding the Bluetooth link on slider drags. The pattern: optimistic UI update → increment gen → delay → check gen unchanged → send.
 
 **AudioFocus for PTT:** `pttDown()` requests `AUDIOFOCUS_GAIN_TRANSIENT` (pauses music), `pttUp()` abandons focus.
 

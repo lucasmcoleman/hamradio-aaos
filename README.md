@@ -35,7 +35,7 @@ Any radio using the Benshi/GAIA protocol, including:
 
 ### Settings
 - RF: Squelch, scan, dual watch, tail elimination, PTT lock
-- Audio routing: independent RX speaker and TX mic selection (Radio / Vehicle / Both)
+- Audio routing: RX speaker selection (Radio / Vehicle / Both). A TX mic setting exists but isn't wired to capture yet
 - AudioFocus integration: music auto-pauses during TX
 - Behavior: auto-switch on RX, PTT mode (momentary / toggle)
 - Developer: mock radio mode, debug console
@@ -43,7 +43,7 @@ Any radio using the Benshi/GAIA protocol, including:
 ### Protocol
 - Bit-level Settings parsing (22-byte wire format with all fields)
 - TNC data fragment reassembly for APRS packet reception
-- Debounced settings writes to avoid BLE queue flooding
+- Debounced settings writes to avoid flooding the Bluetooth link
 - Full command/reply protocol with notification subscriptions
 
 ## Architecture
@@ -56,7 +56,8 @@ Compose UI  -->  MainViewModel  -->  RadioController  -->  IRadioTransport
 ```
 
 **Transport implementations:**
-- `BleTransport` — Bluetooth Low Energy (GATT)
+- `RfcommTransport`: Bluetooth Classic serial (RFCOMM), GAIA-framed. This is what real radios use
+- `BleTransport`: Bluetooth Low Energy (GATT). Still in the tree but not selected by `RadioModule`
 - `MockTransport` — Full radio simulator for development
 - `DisconnectedTransport` — No-op when unconfigured
 
@@ -80,7 +81,7 @@ keyPassword=...
 ## Requirements
 
 - Android 10+ (API 29)
-- Bluetooth LE support
+- Bluetooth Classic (RFCOMM)
 - Landscape display (AAOS head unit or tablet)
 
 ## License
