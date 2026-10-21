@@ -19,49 +19,45 @@ class PttLatchTest {
     }
 
     @Test
-    fun `duplicate down is dropped`() {
-        assertTrue(latch.down())
-        assertFalse(latch.down())
-        assertEquals(1, downs)
-        assertTrue(latch.keyed)
+    fun `every release is forwarded`() {
+        // gesture-cancel release, then screen-dispose release: the controller ignores the extra one
+        latch.down(); latch.up(); latch.up()
+        assertEquals(2, ups)
     }
 
     @Test
-    fun `up without down sends nothing`() {
-        // e.g. the screen-dispose safety release when PTT was never pressed
-        assertFalse(latch.up())
-        assertEquals(0, ups)
-    }
-
-    @Test
-    fun `release after cancel then dispose sends a single up`() {
+    fun `release is forwarded even after transmit ended on its own`() {
         latch.down()
-        latch.up()   // finally block on gesture cancel
-        latch.up()   // DisposableEffect on leaving the screen
+        latch.onRadioTx(true)
+        assertTrue(latch.onRadioTx(false))   // e.g. a status flicker or the radio's own timeout
+        latch.up()
+        assertEquals(1, ups)                 // never swallowed: the mic may still be streaming
+    }
+
+    @Test
+    fun `release without a press is still forwarded`() {
+        latch.up()
         assertEquals(1, ups)
     }
 
     @Test
-    fun `radio ending TX on its own clears the latch without sending`() {
+    fun `transmit ending on its own clears the toggle intent without sending`() {
         latch.down()
         assertFalse(latch.onRadioTx(true))
         assertTrue(latch.onRadioTx(false))
         assertFalse(latch.keyed)
         assertEquals(0, ups)
-        // the next press keys again instead of sending a stray up
-        latch.down()
-        assertEquals(2, downs)
     }
 
     @Test
-    fun `no TX report yet keeps the latch keyed`() {
+    fun `intent stays keyed while capture is still starting`() {
         latch.down()
-        assertFalse(latch.onRadioTx(false))   // radio hasn't caught up
+        assertFalse(latch.onRadioTx(false))
         assertTrue(latch.keyed)
     }
 
     @Test
-    fun `TX reports while not keyed are ignored`() {
+    fun `transmit reports while not keyed are ignored`() {
         assertFalse(latch.onRadioTx(true))
         assertFalse(latch.onRadioTx(false))
         assertFalse(latch.keyed)
