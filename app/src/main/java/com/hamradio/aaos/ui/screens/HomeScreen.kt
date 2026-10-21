@@ -182,10 +182,11 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                // App-side transmit (mic streaming) counts as TX even before the radio reports it.
                 TxRxIndicator(
-                    isInTx      = htStatus.isInTx,
-                    isInRx      = htStatus.isInRx,
-                    squelchOpen = htStatus.isSquelchOpen,
+                    isInTx      = htStatus.isInTx || pttActive,
+                    isInRx      = htStatus.isInRx && !pttActive,
+                    squelchOpen = htStatus.isSquelchOpen && !pttActive,
                     showLabels  = true,
                 )
                 SignalMeter(
