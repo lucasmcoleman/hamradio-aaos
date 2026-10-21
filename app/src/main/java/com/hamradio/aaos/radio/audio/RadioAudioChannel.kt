@@ -338,13 +338,14 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
         }
     }
 
-    private suspend fun playFrame(frame: ByteArray, track: AudioTrack) {
+    internal suspend fun playFrame(frame: ByteArray, track: AudioTrack) {
         if (frame.isEmpty()) return
         if (frame[0] == 1.toByte()) {
             codec.resetDecoder()
             return
         }
-        if (frame.size < 2 || frame[0] != 0.toByte()) return
+        // HTCommander 09dfa3e: 0x00 and 0x03 are RX; 0x09 is our TX echo.
+        if (frame.size < 2 || (frame[0] != 0.toByte() && frame[0] != 3.toByte())) return
         val payload = unescapeFrame(frame, 1) ?: return
         var offset = 0
         while (offset < payload.size) {

@@ -8,12 +8,60 @@ import org.junit.Assert.assertNull
 import org.junit.Before
 import org.junit.Test
 import java.util.Random
+import java.util.Base64
+import java.security.MessageDigest
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class SbcCodecTest {
+    private lateinit var codec: SbcCodecSession
     @Before
     fun resetStreams() {
-        SbcCodec.resetEncoder()
-        SbcCodec.resetDecoder()
+        codec = SbcCodecSession()
+    }
+
+    @Test
+    fun `sixteen fullscale TX frames are bit exact against upstream Dart encoder`() {
+        val bytes = ByteArrayOutputStream()
+        for (frame in 0 until 16) {
+            val pcm = ShortArray(128) { position ->
+                val i = frame * 128 + position
+                when (frame % 4) {
+                    0 -> if (i % 2 == 0) Short.MAX_VALUE else Short.MIN_VALUE
+                    1 -> (((i * 7919 + 12345) and 65535) - 32768).toShort()
+                    2 -> Short.MAX_VALUE
+                    else -> Short.MIN_VALUE
+                }
+            }
+            bytes.write(codec.encode(pcm)!!)
+        }
+        assertArrayEquals(Base64.getDecoder().decode(dartFrames.getValue("bp18-loudness")), bytes.toByteArray())
+    }
+
+    @Test
+    fun `sixteen frame RX streams at both bitpools and allocations are bit exact against upstream Dart`() {
+        for ((name, encoded) in dartFrames) {
+            val session = SbcCodecSession()
+            val frames = Base64.getDecoder().decode(encoded)
+            val pcm = ByteArrayOutputStream()
+            var offset = 0
+            var frameCount = 0
+            while (offset < frames.size) {
+                val length = session.frameLength(frames, offset)!!
+                val samples = session.decode(frames, offset)!!
+                val bytes = ByteBuffer.allocate(samples.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+                for (sample in samples) bytes.putShort(sample)
+                pcm.write(bytes.array())
+                offset += length
+                frameCount++
+            }
+            assertEquals(name, 16, frameCount)
+            assertEquals(name, 4096, pcm.size())
+            val hash = MessageDigest.getInstance("SHA-256").digest(pcm.toByteArray())
+                .joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+            assertEquals(name, dartPcmSha256.getValue(name), hash)
+        }
     }
 
     @Test
@@ -39,13 +87,13 @@ class SbcCodecTest {
 
     @Test
     fun `encoder matches independent FFmpeg first frame vector`() {
-        assertArrayEquals(externalFrames.copyOfRange(0, 44), SbcCodec.encode(referencePcm))
+        assertArrayEquals(externalFrames.copyOfRange(0, 44), codec.encode(referencePcm))
     }
 
     @Test
     fun `decoder matches independent FFmpeg PCM across consecutive frames`() {
         val actual = externalFrames.asList().chunked(44).flatMap { frame ->
-            SbcCodec.decode(frame.toByteArray())!!.toList()
+            codec.decode(frame.toByteArray())!!.toList()
         }
         assertEquals(externalPcm.size, actual.size)
         for (i in actual.indices) {
@@ -57,28 +105,28 @@ class SbcCodecTest {
 
     @Test
     fun `reset starts independent streams and rejected frame preserves synthesis history`() {
-        val first = SbcCodec.encode(referencePcm)!!
-        SbcCodec.encode(referencePcm)
-        SbcCodec.resetEncoder()
-        assertArrayEquals(first, SbcCodec.encode(referencePcm))
-        val expectedFirst = SbcCodec.decode(first)!!
-        val expectedSecond = SbcCodec.decode(first)!!
-        SbcCodec.resetDecoder()
-        assertArrayEquals(expectedFirst, SbcCodec.decode(first))
-        assertNull(SbcCodec.decode(first.copyOf(20)))
-        assertArrayEquals(expectedSecond, SbcCodec.decode(first))
+        val first = codec.encode(referencePcm)!!
+        codec.encode(referencePcm)
+        codec.resetEncoder()
+        assertArrayEquals(first, codec.encode(referencePcm))
+        val expectedFirst = codec.decode(first)!!
+        val expectedSecond = codec.decode(first)!!
+        codec.resetDecoder()
+        assertArrayEquals(expectedFirst, codec.decode(first))
+        assertNull(codec.decode(first.copyOf(20)))
+        assertArrayEquals(expectedSecond, codec.decode(first))
     }
 
     @Test
     fun `first use initializes filters and encodes a complete frame`() {
         // Calling encode forces object initialization (the former forward reference crashed).
-        val frame = SbcCodec.encode(ShortArray(128))!!
+        val frame = codec.encode(ShortArray(128))!!
         assertEquals(44, frame.size)
         assertEquals(0x71, frame[1].toInt() and 0xFF)
         assertEquals(18, frame[2].toInt() and 0xFF)
-        assertEquals(44, SbcCodec.frameLength(frame))
-        assertEquals(128, SbcCodec.decode(frame)!!.size)
-        assertNull(SbcCodec.encode(ShortArray(127)))
+        assertEquals(44, codec.frameLength(frame))
+        assertEquals(128, codec.decode(frame)!!.size)
+        assertNull(codec.encode(ShortArray(127)))
     }
 
     @Test
@@ -88,9 +136,9 @@ class SbcCodecTest {
             ShortArray(128) { if (it % 2 == 0) Short.MIN_VALUE else Short.MAX_VALUE },
             ShortArray(128) { (it * 400 - 25000).toShort() },
         )) {
-            val frame = SbcCodec.encode(pcm)!!
+            val frame = codec.encode(pcm)!!
             assertEquals(44, frame.size)
-            assertEquals(128, SbcCodec.decode(frame)!!.size)
+            assertEquals(128, codec.decode(frame)!!.size)
         }
         // SBC is lossy; these are structural checks, not audio fidelity assertions.
     }
@@ -102,40 +150,40 @@ class SbcCodecTest {
         frame[1] = 0x71
         frame[2] = 18
         frame[3] = 0xD5.toByte() // CRC-8 of 71 12 00 00 00 00, init 0F, polynomial 1D.
-        assertNotNull(SbcCodec.decode(frame))
+        assertNotNull(codec.decode(frame))
         for (index in listOf(2, 3, 4, 5, 6, 7)) {
             val corrupt = frame.copyOf()
             corrupt[index] = (corrupt[index].toInt() xor 1).toByte()
-            assertNull(SbcCodec.decode(corrupt))
+            assertNull(codec.decode(corrupt))
         }
     }
 
     @Test
     fun `all truncated prefixes and invalid offsets are rejected`() {
-        val frame = SbcCodec.encode(ShortArray(128))!!
+        val frame = codec.encode(ShortArray(128))!!
         for (length in 0 until frame.size) {
-            assertNull("length=$length", SbcCodec.decode(frame.copyOf(length)))
-            assertNull(SbcCodec.frameLength(frame.copyOf(length)))
+            assertNull("length=$length", codec.decode(frame.copyOf(length)))
+            assertNull(codec.frameLength(frame.copyOf(length)))
         }
         for (offset in listOf(Int.MIN_VALUE, -1, frame.size, frame.size + 1, Int.MAX_VALUE)) {
-            assertNull(SbcCodec.decode(frame, offset))
-            assertNull(SbcCodec.frameLength(frame, offset))
+            assertNull(codec.decode(frame, offset))
+            assertNull(codec.frameLength(frame, offset))
         }
         val prefixed = byteArrayOf(0, 1, 2) + frame + frame
-        assertEquals(128, SbcCodec.decode(prefixed)!!.size)
-        assertEquals(44, SbcCodec.frameLength(prefixed, 3))
-        assertNull(SbcCodec.frameLength(prefixed))
+        assertEquals(128, codec.decode(prefixed)!!.size)
+        assertEquals(44, codec.frameLength(prefixed, 3))
+        assertNull(codec.frameLength(prefixed))
     }
 
     @Test
     fun `unsupported headers are rejected even with valid CRC`() {
-        // Change each frequency, block, mode, allocation and subband field.
-        for (mask in listOf(0x40, 0x80, 0x10, 0x20, 0x04, 0x08, 0x02, 0x01)) {
+        // Change each frequency, block, mode and subband field.
+        for (mask in listOf(0x40, 0x80, 0x10, 0x20, 0x04, 0x08, 0x01)) {
             val frame = syntheticFrame(18)
             frame[1] = (0x71 xor mask).toByte()
             setCrc(frame)
-            assertNull(SbcCodec.decode(frame))
-            assertNull(SbcCodec.frameLength(frame))
+            assertNull(codec.decode(frame))
+            assertNull(codec.frameLength(frame))
         }
     }
 
@@ -145,12 +193,36 @@ class SbcCodecTest {
             for (scale in listOf(0x00, 0xFF, 0x1F, 0xE2)) {
                 val frame = syntheticFrame(bitpool, scale)
                 if (bitpool in 2..128) {
-                    assertEquals(8 + 2 * bitpool, SbcCodec.frameLength(frame))
-                    assertEquals(128, SbcCodec.decode(frame)!!.size)
+                    assertEquals(8 + 2 * bitpool, codec.frameLength(frame))
+                    assertEquals(128, codec.decode(frame)!!.size)
                 } else {
-                    assertNull(SbcCodec.frameLength(frame))
-                    assertNull(SbcCodec.decode(frame))
+                    assertNull(codec.frameLength(frame))
+                    assertNull(codec.decode(frame))
                 }
+            }
+        }
+    }
+
+    @Test
+    fun `extreme payload codewords saturate instead of changing sign`() {
+        for (bits in 1..16) {
+            val positive = codec.dequantizeSample((1 shl bits) - 1, bits, 15, -1)
+            assertEquals("bits=$bits", Short.MAX_VALUE.toInt(), positive)
+            assertTrue(codec.dequantizeSample(0, bits, 15, -1) <= 0)
+        }
+    }
+
+    @Test(timeout = 5000)
+    fun `valid header random payloads and scale factors remain bounded for both allocations`() {
+        val random = Random(860)
+        for (snr in listOf(false, true)) {
+            repeat(2000) {
+                val frame = syntheticFrame(2 + random.nextInt(127))
+                for (i in 4 until frame.size) frame[i] = random.nextInt(256).toByte()
+                frame[1] = if (snr) 0x73 else 0x71
+                setCrc(frame)
+                assertEquals(frame.size, codec.frameLength(frame))
+                assertEquals(128, codec.decode(frame)!!.size)
             }
         }
     }
@@ -161,7 +233,7 @@ class SbcCodecTest {
         repeat(2000) {
             val bytes = ByteArray(random.nextInt(530))
             random.nextBytes(bytes)
-            SbcCodec.decode(bytes)
+            codec.decode(bytes)
         }
     }
 
@@ -232,5 +304,78 @@ class SbcCodecTest {
         8024, 7229, 6831, 6905, 7291, 7652, 7574, 6699, 4849, 2105, -1243, -4713, -7780, -9996, -11107, -11108,
         -10220, -8850, -7415, -6278, -5621, -5406, -5390, -5207, -4487, -2982, -627, 2389, 5668, 8708, 11006, 12217,
         12216, 11155, 9374, 7335, 5480, 4113, 3315, 2939, 2669, 2127, 975, -938, -3531, -6489, -9339, -11576,
+    )
+
+    // Independently generated by unmodified HTCommander commit 09dfa3e using Dart
+    // 3.13.6. Sixteen contiguous frames cross the filter-state ring repeatedly.
+    // Input alternates fullscale extrema, integer ramp, positive DC, negative DC.
+    // These bytes and expected PCM hashes are external fixtures, not Kotlin outputs.
+    private val dartFrames = mapOf(
+        "bp18-loudness" to (
+            "nHES/qq6u89qqtqqtqquDJPA0FSMlqqlqqlqqlqqlqqlqqlqqlqqlqqlqqmccRKAvt3MzndVHdVGdVIdVDZAbpmZpmUpmQpmZxlauYTpYatEdmFV" +
+            "mFSiFZxxEgXt3dzMfKWiqmgsyicx86i83E821821821821821821821821821821nHESIv3MvLu9tu5tuxtuqFtATE91tBts9ts9ts9ts9ts9ts9" +
+            "ts9ts9ts9tuccRI97Mu8zwNrQNrQtrRGSYYlIxEHtrHtrHtrHtrHtrHtrHtrHtrHtrHtrJxxEk2+3czebVUbVUbVUbVULlZdZVtmFNWFlRF0hVUh" +
+            "VMhVbilyklKkVKkVnHESbO7dvcxy2OJymCSKJ2rzRvztvztvztvztvztvztvztvztvztvztvztuccRIi/cy8u7227m27G26oW0BMT3W0G2z22z22" +
+            "z22z22z22z22z22z22z225xxEj3sy7zPA2tA2tC2tEZJhiUjEQe2se2se2se2se2se2se2se2se2se2snHESzL7dzc53VR3VSHVRoVTZkW5gVohU" +
+            "ohV4hnWklGkUlkU1kXDZFEZVTZGccRLF7szMvImZnoWoIWoGmvRBvO1fO1fO1fO1fO1fO1fO1fO1fO1fO1fO1ZxxEiL9zLy7vbbubbsbbqhbQExP" +
+            "dbQbbPbbPbbPbbPbbPbbPbbPbbPbbPbbnHESPezLvM8Da0Da0La0RkmGJSMRB7ax7ax7ax7ax7ax7ax7ax7ax7ax7ayccRJOzt3d3m1VG1VG1VE1" +
+            "VHFWY5GUpGUpFUpVYWRUmVUWRaVVWVlURlUVpZxxEmzu3b3MihMewLgxKm6R7Zc86b87b87b87b87b87b87b87b87b87b87bnHESIv3MvLu9tu5t" +
+            "uxtuqFtATE91tBts9ts9ts9ts9ts9ts9ts9ts9ts9ts="
+        ),
+        "bp18-snr" to (
+            "nHMScqq6u89at9at9at1aRyNA8bM9atBas9as9as9as9as9as9as9as9as+ccxIMvt3MznbUHbUHbUHbUWaBqVaaVaKVaKVaMdVrjhqjhriSJxWJ" +
+            "xWIxWJxzEont3dzMeUyhVKdZmg5l51G5uM5tt5tt5tt5tt5tt5tt5tt5tt5tt5ttnHMSrv3MvLu922522xm2qi1AJg9q1Bm09209209209209209" +
+            "20920920922ccxKx7Mu8zwKrwKrwqrhCzoRB4qp3qp3qp3qp3qp3qp3qp3qp3qp3qp3qp5xzEsG+3czedtYdtYdtYdtQixrt5TquaqObuJjnFUnF" +
+            "TjFTimTaoibMjXMjnHMS4O7dvcxy2OJymCSKJ2rzRvztvztvztvztvztvztvztvztvztvztvztuccxKu/cy8u73bbnbbGbaqLUAmD2rUGbT3bT3b" +
+            "T3bT3bT3bT3bT3bT3bT3bZxzErHsy7zPAqvAqvCquELOhEHiqneqneqneqneqneqneqneqneqneqneqnnHMSQL7dzc521h21h21iG1iaxOchyMVu" +
+            "MWOKWtqiJsyNcxtbBs5UxJVM5VOccxJJ7szMvIMmHQaHQaHNaOhGedVedVedVedVedVedVedVedVedVedVedVZxzEq79zLy7vdtudtsZtqotQCYP" +
+            "atQZtPdtPdtPdtPdtPdtPdtPdtPdtPdtnHMSsezLvM8Cq8Cq8Kq4Qs6EQeKqd6qd6qd6qd6qd6qd6qd6qd6qd6qd6qeccxLCzt3d3lqqFqqFqqFq" +
+            "qGKs5yM1SMxSK1Sq4sjFMq0si4qqkrK0jKwrS5xzEuDu3b3MihMewLgxKm6R7Zc86b87b87b87b87b87b87b87b87b87b87bnHMSrv3MvLu92252" +
+            "2xm2qi1AJg9q1Bm0920920920920920920920920920="
+        ),
+        "bp40-loudness" to (
+            "nHEocqq6u89973ve74HPg97vic58Hs6lDsuRTvDFj2oHTvEb8seFznwgx3oPc+Dnfe973ud973ve533ve97nfe973ud973ve533ve97nfe973ud9" +
+            "73ve55xxKAy+3czOffe973B9973vcHX3ua6Akfi6M1Ex16gFtsql5lWpmsZeO7hO1V34mArVXdmYpzdhcjau+kNEdjbaP2aWsvkmQLjebRlwSF5d" +
+            "nhI4Mk4d1DiccSiJ7d3czH87ll5GjKyxW8GGvbkVtIxfQNTS/OwxF8L810opWvz4PdCH/Pe973f8973vd/z3ve93/Pe973f8973vd/z3ve93/Pe9" +
+            "73f8973vd/z3ve93nHEorv3MvLu+ve93u75B73e7sjXwdzuqVQ7HJEECvYKeP7svGNpBuhB3Oz++D2e7QD3vd7s/ve93uz+973e7P73vd7s/ve93" +
+            "uz+973e7P73vd7s/ve93u5xxKLHsy7zPAHvd3u8Bc93e7w2LmiDOF0SpGW6F2cduJ4+S0qanfYOaIMd/e93e53973d7nf3vd3ud/e93e53973d7n" +
+            "f3vd3ud/e93e53973d7nf3vd3ueccSjBvt3M3n33ve9wffe973B5+D3vgIIIujJhPjvN88iLGGmuZ7bbP2OGNto/ZYay+SZAmN5tGXBYXl2eElgy" +
+            "Th3UWHY7lp5X2awwu5ZFrbhUliWdwFKWnHEo4O7dvcx4tiYNh4p8s4cthp1sy2qMbi5KefzlHjCV/QQe73f8+97vd/z73u93/Pve73f8+97vd/z7" +
+            "3u93/Pve73f8+97vd/z73u93/Pve73f8+97vd5xxKK79zLy7vr3vd7u+Qe93u7I18Hc7qlUOxyRBAr2Cnj+7LxjaQboQdzs/vg9nu0A973e7P73v" +
+            "d7s/ve93uz+973e7P73vd7s/ve93uz+973e7P73vd7uccSix7Mu8zwB73d7vAXPd3u8Ni5ogzhdEqRluhdnHbiePktKmp32DmiDHf3vd3ud/e93e" +
+            "53973d7nf3vd3ud/e93e53973d7nf3vd3ud/e93e53973d7nnHEoQL7dzc59973vcH33ve9wigg9z4BqGDYRQd6cvAroxm6lLUlmXaHRODJOIdEo" +
+            "ejuWl0fZrDC1xkWtuFG2JZ3AUbZBbE0Oh9T5Zoc5TSpZ62hU6mVqh5xxKEnuzMy8kGIzS+h8iaHcGYSZn8yhhINX3YL9HQc7C/0DXRgr/PvdCDP8" +
+            "+973u/z73ve7/Pve97v8+973u/z73ve7/Pve97v8+973u/z73ve7/Pve97uccSiu/cy8u76973e7vkHvd7uyNfB3O6pVDsckQQK9gp4/uy8Y2kG6" +
+            "EHc7P74PZ7tAPe93uz+973e7P73vd7s/ve93uz+973e7P73vd7s/ve93uz+973e7nHEosezLvM8Ae93e7wFz3d7vDYuaIM4XRKkZboXZx24nj5LS" +
+            "pqd9g5ogx3973d7nf3vd3ud/e93e53973d7nf3vd3ud/e93e53973d7nf3vd3ud/e93e55xxKMLO3d3effe973B9973vcH4IPc+Aahe18WF+ajVP" +
+            "t629OPGnYa29EaZRncEQlmFsTW2HqPlmJ1llKlnraGjqZaqHwMXSU5VxFULUZmUUurRmUQY2tleccSjg7t29zIyaCnNtgMjQ7bqE0U1MyqECUsdy" +
+            "9XliUnb9C19PePsDns93/Pve73f8+97vd/z73u93/Pve73f8+97vd/z73u93/Pve73f8+97vd/z73u93nHEorv3MvLu+ve93u75B73e7sjXwdzuq" +
+            "VQ7HJEECvYKeP7svGNpBuhB3Oz++D2e7QD3vd7s/ve93uz+973e7P73vd7s/ve93uz+973e7P73vd7s/ve93uw=="
+        ),
+        "bp40-snr" to (
+            "nHMo/qq6u893e73vf3d7vfB+h3PB7XiUdjkVdOMsdqBAS4i/Lj+Hc8IOQHd7Pg8/d3u97z93e73vP3d7ve8/d3u97z93e73vP3d7ve8/d3u97z93" +
+            "e73vP5xzKIC+3czOd++93cB3773dwGfvOZ4Ch/G6JUU3TygK27rL5iqom0xeNuNLat3yYguK3fJinO5hYNur1UNJ2jt0P05cq/KmAuHZ2xldJVmb" +
+            "neTiKTyd5OKccygF7d3czH89yy5GjKZYrcGGxtyKtIxXoGnS/OYYi8L826UUWvz0HueH/Pve93f8+973d/z73vd3/Pve93f8+973d/z73vd3/Pve" +
+            "93f8+973d/z73vd3nHMoIv3MvLu+fe93u72B73e7sm3wdzuqqQ7HJEEGvYKeP3cvGNpBchB3Oz9+D2e7QHnvd7s/fe93uz9973e7P33vd7s/fe93" +
+            "uz9973e7P33vd7s/fe93u5xzKD3sy7zPAPe7u78A57u7vw0XNDs8FolSNbmFs47Yn48lpUqffQc0OyB+97u7n373u7uffve7u59+97u7n373u7uf" +
+            "fve7u59+97u7n373u7uffve7u5+ccyhNvt3M3nfve7vAd+97u8B4EHu8A3hRdEMEOPebzqKMcNMzIKuWfowaO3R+lFyr8kwFIdnaMrslWZs7yuIp" +
+            "PDvKonj3LXLe1phhbRlGu3DM3CZbgM0cnHMobO7dvcx4sxMNh4p6WacthqK2S2qMaxcqefzijxCV/QIPb3f8+e9vd/z97293/P3vb3f8/e9vd/z9" +
+            "7293/P3vb3f8/e9vd/z97293/P3vb3f8/e9vd5xzKCL9zLy7vn3vd7u9ge93u7Jt8Hc7qqkOxyRBBr2Cnj93LxjaQXIQdzs/fg9nu0B573e7P33v" +
+            "d7s/fe93uz9973e7P33vd7s/fe93uz9973e7P33vd7uccyg97Mu8zwD3u7u/AOe7u78NFzQ7PBaJUjW5hbOO2J+PJaVKn30HNDsgfve7u59+97u7" +
+            "n373u7uffve7u59+97u7n373u7uffve7u59+97u7n373u7ufnHMozL7dzc5373u9wHfve73AiDB7PgNokGvFBdqZeCuiub1KNShpW0PE4ik8Q8Si" +
+            "ePcs3R7WmGFXGUa7cMbcJluAxtw1mJm6H8PSzJzlRJSzraJTlMqqIJxzKMXuzMy8kGUZpeF8jNDuFIScz+YUhIGr7oT9HoOdB/0Jroun/P3ug7f8" +
+            "/e97t/z973u3/P3ve7f8/e97t/z973u3/P3ve7f8/e97t/z973u3/P3ve7eccygi/cy8u75973e7vYHvd7uybfB3O6qpDsckQQa9gp4/dy8Y2kFy" +
+            "EHc7P34PZ7tAee93uz9973e7P33vd7s/fe93uz9973e7P33vd7s/fe93uz9973e7nHMoPezLvM8A97u7vwDnu7u/DRc0OzwWiVI1uYWzjtifjyWl" +
+            "Sp99BzQ7IH73u7uffve7u59+97u7n373u7uffve7u59+97u7n373u7uffve7u59+97u7n5xzKE7O3d3ed973veB33ve94Hgg9z4BaF7XxYJ5qNU+" +
+            "7qb048bPVrb0Ro1GdwRCjVWxNbYvo+WYnVJkqWet0GOplqoQsxdJTkxkVQtRrWRS6tHORBja2W6ccyhs7t29zIydBTNtgNBobbqE1KasyqEBKUdy" +
+            "9YCxMnb9Da+PePsJz293/P3vb3f8/e9vd/z97293/P3vb3f8/e9vd/z97293/P3vb3f8/e9vd/z97293nHMoIv3MvLu+fe93u72B73e7sm3wdzuq" +
+            "qQ7HJEEGvYKeP3cvGNpBchB3Oz9+D2e7QHnvd7s/fe93uz9973e7P33vd7s/fe93uz9973e7P33vd7s/fe93uw=="
+        ),
+    )
+    private val dartPcmSha256 = mapOf(
+        "bp18-loudness" to "6157a23cafbcf536c68c8959a8718fec146f46af8bb16ad429d27c05c25add8f",
+        "bp18-snr" to "e8af6287448a5a138e29aef9f90580e50895a201033835231ee7cfa6c7361661",
+        "bp40-loudness" to "c0048ba30e09e49e27f3291ec2f9e83db7f6f62989ea102211122baef4484b2d",
+        "bp40-snr" to "4866773e1afd7ef50c39a53a6648a7feac77d87e6fd9e139e8f97fddc8375d4b",
     )
 }

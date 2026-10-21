@@ -8,7 +8,7 @@
  */
 package com.hamradio.aaos.radio.audio
 
-/** Fixed 32 kHz mono SBC, 16 blocks, eight subbands, loudness, TX bitpool 18. */
+/** 32 kHz mono SBC, 16 blocks/eight subbands; loudness TX18, loudness or SNR RX. */
 class SbcCodecSession {
     companion object {
         const val SBC_SYNCWORD = 0x9C.toByte()
@@ -54,7 +54,7 @@ class SbcCodecSession {
             for (block in samples) magnitude = magnitude or kotlin.math.abs(block[sb])
             if (magnitude == 0) 0 else 31 - Integer.numberOfLeadingZeros(magnitude)
         }
-        val bits = loudnessBitAllocation(sf, BITPOOL)
+        val bits = bitAllocation(sf, BITPOOL)
         val quantized = Array(BLOCKS) { block ->
             IntArray(SUBBANDS) { sb ->
                 val levels = (1 shl bits[sb]) - 1
@@ -103,21 +103,27 @@ class SbcCodecSession {
         val length = frameLength(frame, pos) ?: return null
         val reader = ByteArrayBitReader(frame.copyOfRange(pos, pos + length), 4)
         val sf = IntArray(SUBBANDS) { reader.read(4) }
-        val bits = loudnessBitAllocation(sf, frame[pos + 2].toInt() and 0xFF)
+        val bits = bitAllocation(sf, frame[pos + 2].toInt() and 0xFF,
+            snr = (frame[pos + 1].toInt() and 2) != 0)
         val scale = 14 - sf.max()
         val pcm = ShortArray(SAMPLES_PER_FRAME)
         for (block in 0 until BLOCKS) {
             val samples = IntArray(SUBBANDS) { sb ->
                 if (bits[sb] == 0) 0 else {
                     val raw = reader.read(bits[sb])
-                    val sample = ((raw.toLong() shl 1) or 1L) * SbcTables.rangeScale[bits[sb] - 1]
-                    // Match the reference Int16List storage semantics before synthesis.
-                    ((sample - (1L shl 28)) shr (28 - (sf[sb] + 1 + scale))).toShort().toInt()
+                    dequantizeSample(raw, bits[sb], sf[sb], scale)
                 }
             }
             synthesize(samples, scale, pcm, block * SUBBANDS)
         }
         return pcm
+    }
+
+    // Payload bits are not CRC-protected. Saturate corrupt extreme codewords rather
+    // than wrapping a positive reconstructed subband sample into negative Int16.
+    internal fun dequantizeSample(raw: Int, bits: Int, sf: Int, scale: Int): Int {
+        val sample = ((raw.toLong() shl 1) or 1L) * SbcTables.rangeScale[bits - 1]
+        return saturate((sample - (1L shl 28)) shr (28 - (sf + 1 + scale)))
     }
 
     private fun synthesize(input: IntArray, scale: Int, pcm: ShortArray, offset: Int) {
@@ -159,12 +165,14 @@ class SbcCodecSession {
         decoderIndex = (decoderIndex + 1) % 10
     }
 
-    private fun loudnessBitAllocation(sf: IntArray, bitpool: Int): IntArray {
+    private fun bitAllocation(sf: IntArray, bitpool: Int, snr: Boolean = false): IntArray {
         require(sf.size == SUBBANDS && bitpool in 2..(16 * SUBBANDS))
         val offsets = intArrayOf(-3, 0, 0, 0, 0, 0, 1, 2) // 32 kHz, eight subbands
         val needs = IntArray(8) { sb ->
-            val loudness = if (sf[sb] == 0) -5 else sf[sb] - offsets[sb]
-            if (loudness > 0) loudness shr 1 else loudness
+            if (snr) sf[sb] else {
+                val loudness = if (sf[sb] == 0) -5 else sf[sb] - offsets[sb]
+                if (loudness > 0) loudness shr 1 else loudness
+            }
         }
         var bitCount = 0
         var slice = maxOf(0, needs.max()) + 1
@@ -197,7 +205,7 @@ class SbcCodecSession {
 
     /**
      * Length of a complete supported frame at exactly [offset], including CRC validation.
-     * Supports only 32 kHz, mono, 16 blocks, 8 subbands and loudness.
+     * Supports 32 kHz, mono, 16 blocks, 8 subbands and loudness or SNR.
      * CRC protects the header/scale factors, not the audio payload.
      */
     fun frameLength(frame: ByteArray, offset: Int = 0): Int? {
@@ -205,7 +213,7 @@ class SbcCodecSession {
         if (frame[offset] != SBC_SYNCWORD) return null
         val supportedHeader = (FREQ_32K shl 6) or (3 shl 4) or
             (MODE_MONO shl 2) or (ALLOCATION_LOUDNESS shl 1) or 1
-        if ((frame[offset + 1].toInt() and 0xFF) != supportedHeader) return null
+        if ((frame[offset + 1].toInt() and 0xFD) != supportedHeader) return null
         val bitpool = frame[offset + 2].toInt() and 0xFF
         if (bitpool !in 2..(16 * SUBBANDS)) return null
         val length = 4 + SUBBANDS / 2 + (BLOCKS * bitpool + 7) / 8
@@ -305,7 +313,7 @@ class SbcCodecSession {
     }
 }
 
-/** Compatibility facade. Live audio channels should own a separate [SbcCodecSession]. */
+/** Wire-format constants only. Every audio stream must own a [SbcCodecSession]. */
 object SbcCodec {
     const val SBC_SYNCWORD = SbcCodecSession.SBC_SYNCWORD
     const val FREQ_32K = SbcCodecSession.FREQ_32K
@@ -317,11 +325,4 @@ object SbcCodec {
     const val SAMPLES_PER_FRAME = SbcCodecSession.SAMPLES_PER_FRAME
     const val PCM_BYTES_PER_FRAME = SbcCodecSession.PCM_BYTES_PER_FRAME
 
-    private val session = SbcCodecSession()
-
-    fun resetEncoder() = session.resetEncoder()
-    fun resetDecoder() = session.resetDecoder()
-    fun encode(pcm: ShortArray): ByteArray? = session.encode(pcm)
-    fun decode(frame: ByteArray, offset: Int = 0): ShortArray? = session.decode(frame, offset)
-    fun frameLength(frame: ByteArray, offset: Int = 0): Int? = session.frameLength(frame, offset)
 }

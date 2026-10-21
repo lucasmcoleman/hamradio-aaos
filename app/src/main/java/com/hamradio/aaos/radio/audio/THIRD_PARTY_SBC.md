@@ -9,10 +9,11 @@ Copyright 2026 Ylian Saint-Hilaire. Licensed under the Apache License, Version 2
 https://www.apache.org/licenses/LICENSE-2.0
 
 Changes: Kotlin adaptation restricted to 32 kHz mono, 16 blocks, eight subbands and
-loudness allocation; Long intermediates preserve Dart integer arithmetic; bounded
+loudness TX and loudness/SNR RX allocation; Long intermediates preserve Dart integer arithmetic; bounded
 frame parsing and CRC validation; independent encoder/decoder reset methods.
 Each SbcCodecSession owns synchronized encoder/decoder state for one TX and one RX
-stream. The SbcCodec facade retains a default session for compatibility.
+stream. SbcCodec exposes constants only. Corrupt dequantized extremes saturate
+instead of inheriting the reference Int16List wraparound.
 
 ## Apache License, Version 2.0
 
