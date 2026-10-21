@@ -11,7 +11,8 @@ https://www.apache.org/licenses/LICENSE-2.0
 Changes: Kotlin adaptation restricted to 32 kHz mono, 16 blocks, eight subbands and
 loudness allocation; Long intermediates preserve Dart integer arithmetic; bounded
 frame parsing and CRC validation; independent encoder/decoder reset methods.
-The facade remains synchronized and stateful for one TX and one RX stream.
+Each SbcCodecSession owns synchronized encoder/decoder state for one TX and one RX
+stream. The SbcCodec facade retains a default session for compatibility.
 
 ## Apache License, Version 2.0
 
