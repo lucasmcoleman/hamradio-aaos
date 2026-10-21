@@ -52,10 +52,10 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -107,29 +107,9 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
     val vfoA       by vm.vfoA.collectAsStateWithLifecycle()
     val vfoB       by vm.vfoB.collectAsStateWithLifecycle()
     var showConnectionSheet by remember { mutableStateOf(false) }
-    val settings   by vm.settings.collectAsStateWithLifecycle()
-    val allChannels by vm.channels.collectAsStateWithLifecycle()
-    var pttSlot by remember { mutableStateOf("A") }
-    val autoSwitchOnRx by vm.autoSwitchOnRx.collectAsStateWithLifecycle()
+    val pttSlot    by vm.activeSlot.collectAsStateWithLifecycle()
+    val pttKeyed   by vm.pttKeyed.collectAsStateWithLifecycle()
     var showVfoEditor by remember { mutableStateOf<String?>(null) }
-
-    // Auto-switch slot on RX activity (if enabled and channel not muted)
-    LaunchedEffect(autoSwitchOnRx, htStatus.isSquelchOpen, htStatus.isInTx, htStatus.channelId) {
-        if (autoSwitchOnRx && htStatus.isSquelchOpen && !htStatus.isInTx) {
-            val rxChId = htStatus.channelId
-            val rxChannel = allChannels.firstOrNull { it.channelId == rxChId }
-            if (rxChannel != null && !rxChannel.mute) {
-                val newSlot = when (rxChId) {
-                    settings?.channelA -> "A"
-                    settings?.channelB -> "B"
-                    else -> null
-                }
-                if (newSlot != null && newSlot != pttSlot) {
-                    pttSlot = newSlot
-                }
-            }
-        }
-    }
 
     if (showConnectionSheet) {
         ConnectionSheet(
@@ -228,10 +208,11 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
             // PTT button
             val pttToggleMode by vm.pttToggleMode.collectAsStateWithLifecycle()
             PttButton(
-                isTransmitting = htStatus.isInTx,
+                isTransmitting = htStatus.isInTx || pttKeyed,
                 toggleMode     = pttToggleMode,
                 onPttDown      = { vm.pttDown() },
                 onPttUp        = { vm.pttUp() },
+                onPttToggle    = { vm.pttToggle() },
             )
 
             // Power selector — controls whichever channel is selected by pttSlot
@@ -276,7 +257,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus  = htStatus,
                     isPrimary = pttSlot == "A",
                     modifier  = Modifier.weight(weightA).fillMaxWidth(),
-                    onTap     = { pttSlot = "A"; vm.setActiveSlot("A") },
+                    onTap     = { vm.setActiveSlot("A") },
                     onLongPress = { showVfoEditor = "A" },
                     onModeToggle = { vm.toggleVfoMode("A") },
                 )
@@ -287,7 +268,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus   = htStatus,
                     isPrimary  = pttSlot == "A",
                     modifier   = Modifier.weight(weightA).fillMaxWidth(),
-                    onTap      = { pttSlot = "A"; vm.setActiveSlot("A") },
+                    onTap      = { vm.setActiveSlot("A") },
                     onLongPress = onNavigateToChannels,
                     onModeToggle = { vm.toggleVfoMode("A") },
                 )
@@ -300,7 +281,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus  = htStatus,
                     isPrimary = pttSlot == "B",
                     modifier  = Modifier.weight(weightB).fillMaxWidth(),
-                    onTap     = { pttSlot = "B"; vm.setActiveSlot("B") },
+                    onTap     = { vm.setActiveSlot("B") },
                     onLongPress = { showVfoEditor = "B" },
                     onModeToggle = { vm.toggleVfoMode("B") },
                 )
@@ -311,7 +292,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                     htStatus   = htStatus,
                     isPrimary  = pttSlot == "B",
                     modifier   = Modifier.weight(weightB).fillMaxWidth(),
-                    onTap      = { pttSlot = "B"; vm.setActiveSlot("B") },
+                    onTap      = { vm.setActiveSlot("B") },
                     onLongPress = onNavigateToChannels,
                     onModeToggle = { vm.toggleVfoMode("B") },
                 )
@@ -906,7 +887,15 @@ private fun PttButton(
     toggleMode: Boolean = false,
     onPttDown: () -> Unit,
     onPttUp: () -> Unit,
+    onPttToggle: () -> Unit,
 ) {
+    // pointerInput outlives recompositions, so read the latest callbacks through these.
+    val down   by rememberUpdatedState(onPttDown)
+    val up     by rememberUpdatedState(onPttUp)
+    val toggle by rememberUpdatedState(onPttToggle)
+    // Leaving the screen (tab change, sheet, activity teardown) must never leave the radio keyed.
+    DisposableEffect(Unit) { onDispose { up() } }
+
     val bgColor = if (isTransmitting) TxRed else TxRedDim
     val textColor = if (isTransmitting) Color.White else TxRed
 
@@ -919,18 +908,17 @@ private fun PttButton(
             .pointerInput(toggleMode) {
                 if (toggleMode) {
                     // Tap on / tap off
-                    detectTapGestures(
-                        onTap = {
-                            if (isTransmitting) onPttUp() else onPttDown()
-                        },
-                    )
+                    detectTapGestures(onTap = { toggle() })
                 } else {
                     // Momentary: hold to transmit
                     detectTapGestures(
                         onPress = {
-                            onPttDown()
-                            tryAwaitRelease()
-                            onPttUp()
+                            down()
+                            try {
+                                tryAwaitRelease()
+                            } finally {
+                                up()      // also runs if the gesture is cancelled mid-press
+                            }
                         },
                     )
                 }

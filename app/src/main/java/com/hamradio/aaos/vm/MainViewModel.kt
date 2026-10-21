@@ -55,6 +55,15 @@ class MainViewModel @Inject constructor(
     val smartBeaconEnabled: StateFlow<Boolean> = _smartBeaconEnabled.asStateFlow()
     fun setSmartBeaconEnabled(enabled: Boolean) { _smartBeaconEnabled.value = enabled }
 
+    /** PTT as the app requested it. Drops duplicate down/up so one press sends one of each. */
+    private val pttLatch = PttLatch(sendDown = { radio.pttDown() }, sendUp = { radio.pttUp() })
+    private val _pttKeyed = MutableStateFlow(false)
+    val pttKeyed: StateFlow<Boolean> = _pttKeyed.asStateFlow()
+
+    /** Slot ("A"/"B") PTT and the power selector act on. Lives here so it survives tab changes. */
+    private val _activeSlot = MutableStateFlow("A")
+    val activeSlot: StateFlow<String> = _activeSlot.asStateFlow()
+
     /** True when mock transport is active. */
     val isMockMode: Boolean get() = prefs.useMockRadio
 
@@ -101,6 +110,32 @@ class MainViewModel @Inject constructor(
     }
 
     init {
+        // Clear the PTT latch if the radio stops transmitting on its own (timeout, dropped link).
+        viewModelScope.launch {
+            htStatus.collect { st -> if (pttLatch.onRadioTx(st.isInTx)) _pttKeyed.value = false }
+        }
+
+        // Follow the radio's active slot when idle; when receiving, optionally switch to the
+        // receiving slot (and tell the radio, so PTT keys the channel that's highlighted).
+        viewModelScope.launch {
+            combine(htStatus, settings) { st, s -> st to s }.collect { (st, s) ->
+                if (s == null) return@collect
+                val slot = when (st.channelId) {
+                    s.channelA -> "A"
+                    s.channelB -> "B"
+                    else -> return@collect
+                }
+                if (st.isSquelchOpen && !st.isInTx) {
+                    val rxChannel = channels.value.firstOrNull { it.channelId == st.channelId }
+                    if (_autoSwitchOnRx.value && rxChannel != null && !rxChannel.mute && slot != _activeSlot.value) {
+                        setActiveSlot(slot)
+                    }
+                } else if (!st.isInRx && !st.isInTx) {
+                    _activeSlot.value = slot
+                }
+            }
+        }
+
         // Sync VFO frequencies from radio settings when they arrive
         viewModelScope.launch {
             settings.collect { s ->
@@ -236,6 +271,7 @@ class MainViewModel @Inject constructor(
 
     /** Switch the radio's active A/B slot via DO_PROG_FUNC(TOGGLE_AB_CH). */
     fun setActiveSlot(slot: String) {
+        _activeSlot.value = slot
         // Determine current active slot from htStatus — channelId matches channelA or channelB
         val s = settings.value ?: return
         val currentIsA = radio.htStatus.value.channelId == s.channelA
@@ -245,8 +281,9 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun pttDown() = radio.pttDown()
-    fun pttUp()   = radio.pttUp()
+    fun pttDown() { if (pttLatch.down()) _pttKeyed.value = true }
+    fun pttUp()   { if (pttLatch.up()) _pttKeyed.value = false }
+    fun pttToggle() { if (pttLatch.keyed) pttUp() else pttDown() }
 
     fun saveChannel(channel: RfChannel) = radio.saveChannel(channel)
 
@@ -301,6 +338,7 @@ class MainViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        pttUp()
         radio.disconnect()
     }
 }

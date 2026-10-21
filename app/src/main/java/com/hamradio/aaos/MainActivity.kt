@@ -32,6 +32,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        vm.disconnect()
+        // Only on a real exit. A recreate keeps the ViewModel and the link; disconnecting here raced
+        // the new composition's connect() and could leave the radio disconnected.
+        if (isFinishing) vm.disconnect()
     }
 }
