@@ -210,6 +210,8 @@ class MainViewModel @Inject constructor(
     val isVfoModeB: StateFlow<Boolean> = _isVfoModeB.asStateFlow()
 
     fun toggleVfoMode(slot: String) {
+        val on = if (slot == "A") _isVfoModeA.value else _isVfoModeB.value
+        if (!on && !VFO_MODE_ENABLED) return    // switching back to channel mode is always allowed
         if (slot == "A") _isVfoModeA.value = !_isVfoModeA.value
         else _isVfoModeB.value = !_isVfoModeB.value
     }
@@ -334,6 +336,15 @@ class MainViewModel @Inject constructor(
         prefs.deviceAddress = address
         prefs.useMockRadio = false
         _restartEvent.tryEmit(Unit)
+    }
+
+    companion object {
+        /**
+         * VFO mode is off until it drives the radio. Today only the VFO frequency reaches the radio;
+         * offset, tone, power and bandwidth stay on screen, so the radio could transmit on something
+         * other than what's displayed.
+         */
+        const val VFO_MODE_ENABLED = false
     }
 
     override fun onCleared() {

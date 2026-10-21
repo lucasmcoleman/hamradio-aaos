@@ -432,7 +432,7 @@ private fun ChannelDisplay(
         }
 
         // Bottom-right CH badge showing current mode; tap to switch to VFO
-        if (isPrimary) {
+        if (isPrimary && MainViewModel.VFO_MODE_ENABLED) {
             Text(
                 text  = "CH",
                 style = MaterialTheme.typography.labelMedium,
