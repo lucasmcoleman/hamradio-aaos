@@ -271,6 +271,15 @@ class MainViewModel @Inject constructor(
     fun selectChannelA(channelId: Int) = radio.setChannelA(channelId)
     fun selectChannelB(channelId: Int) = radio.setChannelB(channelId)
 
+    /** Channel up/down on the active slot, through the radio's stored channels (driving screen). */
+    fun stepChannel(delta: Int) {
+        val s = settings.value ?: return
+        val onA = _activeSlot.value == "A"
+        val current = if (onA) s.channelA else s.channelB
+        val next = ChannelStep.next(channels.value.map { it.channelId }, current, delta) ?: return
+        if (onA) radio.setChannelA(next) else radio.setChannelB(next)
+    }
+
     /** Switch the radio's active A/B slot via DO_PROG_FUNC(TOGGLE_AB_CH). */
     fun setActiveSlot(slot: String) {
         _activeSlot.value = slot

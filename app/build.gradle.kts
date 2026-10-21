@@ -18,6 +18,8 @@ if (keystorePropertiesFile.exists()) {
 android {
     namespace = "com.hamradio.aaos"
     compileSdk = 35
+    // CarUxRestrictionsManager for the driving screen; optional at runtime (uses-library required=false).
+    useLibrary("android.car")
 
     defaultConfig {
         applicationId = "com.kk4fvc.benshiradiocontrol"

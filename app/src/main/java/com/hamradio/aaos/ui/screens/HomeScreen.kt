@@ -55,7 +55,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,6 +77,7 @@ import com.hamradio.aaos.radio.transport.ConnectionState
 import com.hamradio.aaos.ui.components.SignalMeter
 import com.hamradio.aaos.ui.components.TxRxIndicator
 import com.hamradio.aaos.ui.components.VolumeSlider
+import com.hamradio.aaos.ui.components.PttButton
 import com.hamradio.aaos.ui.theme.Accent
 import com.hamradio.aaos.ui.theme.Background
 import com.hamradio.aaos.ui.theme.GpsLocked
@@ -90,7 +90,6 @@ import com.hamradio.aaos.ui.theme.ScanActive
 import com.hamradio.aaos.ui.theme.SurfaceCard
 import com.hamradio.aaos.ui.theme.SurfaceElevated
 import com.hamradio.aaos.ui.theme.TxRed
-import com.hamradio.aaos.ui.theme.TxRedDim
 import com.hamradio.aaos.vm.MainViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -213,6 +212,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
                 onPttDown      = { vm.pttDown() },
                 onPttUp        = { vm.pttUp() },
                 onPttToggle    = { vm.pttToggle() },
+                txLabel        = if (isMock) "LOOPBACK · NO RF" else "TX",
             )
 
             // Power selector — controls whichever channel is selected by pttSlot
@@ -880,58 +880,6 @@ private fun VfoEditorSheet(
 // ---------------------------------------------------------------------------
 // PTT Button — press-and-hold to transmit
 // ---------------------------------------------------------------------------
-
-@Composable
-private fun PttButton(
-    isTransmitting: Boolean,
-    toggleMode: Boolean = false,
-    onPttDown: () -> Unit,
-    onPttUp: () -> Unit,
-    onPttToggle: () -> Unit,
-) {
-    // pointerInput outlives recompositions, so read the latest callbacks through these.
-    val down   by rememberUpdatedState(onPttDown)
-    val up     by rememberUpdatedState(onPttUp)
-    val toggle by rememberUpdatedState(onPttToggle)
-    // Leaving the screen (tab change, sheet, activity teardown) must never leave the radio keyed.
-    DisposableEffect(Unit) { onDispose { up() } }
-
-    val bgColor = if (isTransmitting) TxRed else TxRedDim
-    val textColor = if (isTransmitting) Color.White else TxRed
-
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(52.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(bgColor)
-            .pointerInput(toggleMode) {
-                if (toggleMode) {
-                    // Tap on / tap off
-                    detectTapGestures(onTap = { toggle() })
-                } else {
-                    // Momentary: hold to transmit
-                    detectTapGestures(
-                        onPress = {
-                            down()
-                            try {
-                                tryAwaitRelease()
-                            } finally {
-                                up()      // also runs if the gesture is cancelled mid-press
-                            }
-                        },
-                    )
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text  = if (isTransmitting) "TX" else "PTT",
-            style = MaterialTheme.typography.titleMedium,
-            color = textColor,
-        )
-    }
-}
 
 /** 3-button power selector: High / Med / Low — shows current channel's power highlighted. */
 @Composable

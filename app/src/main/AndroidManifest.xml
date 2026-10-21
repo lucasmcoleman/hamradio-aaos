@@ -39,7 +39,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Allowed while driving: MainActivity swaps to DrivingScreen whenever the head unit
+                 requires distraction-optimized UI (CarDrivingState). -->
+            <meta-data android:name="distractionOptimized" android:value="true" />
         </activity>
+
+        <uses-library android:name="android.car" android:required="false" />
 
         <service
             android:name=".service.RadioLinkService"
