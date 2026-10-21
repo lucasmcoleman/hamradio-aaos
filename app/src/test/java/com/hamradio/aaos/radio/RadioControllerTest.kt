@@ -30,6 +30,19 @@ class RadioControllerTest {
     }
     @After fun cleanup() = unmockkAll()
 
+    @Test fun loopbackIsSelectedOnlyForMockTransport() = runTest {
+        val simulated = selectRadioAudio(context, MockTransport(backgroundScope))
+        val real = selectRadioAudio(context, RfcommTransport(context, "unused", backgroundScope))
+        try {
+            assertTrue(simulated is com.hamradio.aaos.radio.audio.MockRadioAudioChannel)
+            assertTrue(real is com.hamradio.aaos.radio.audio.RadioAudioChannel)
+            assertNull(selectRadioAudio(context, DisconnectedTransport()))
+        } finally {
+            simulated?.close()
+            real?.close()
+        }
+    }
+
     private class FakeTransport(val pending: Boolean = false) : IRadioTransport {
         val state = MutableStateFlow(ConnectionState.DISCONNECTED)
         override val connectionState = state.asStateFlow()

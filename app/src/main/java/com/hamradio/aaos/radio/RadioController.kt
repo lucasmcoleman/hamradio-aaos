@@ -11,6 +11,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import com.hamradio.aaos.radio.audio.RadioAudioChannel
 import com.hamradio.aaos.radio.audio.RadioAudioControl
+import com.hamradio.aaos.radio.audio.MockRadioAudioChannel
+import com.hamradio.aaos.radio.transport.MockTransport
+import com.hamradio.aaos.radio.transport.RfcommTransport
 import com.hamradio.aaos.radio.audio.AudioFocusControl
 import com.hamradio.aaos.radio.audio.AndroidRadioAudioFocus
 import com.hamradio.aaos.radio.protocol.AprsPacket
@@ -41,6 +44,14 @@ import javax.inject.Singleton
 private const val TAG = "RadioController"
 private const val MAX_CHANNELS = 64
 
+/** Select from the actual transport, never from a stale mock preference. */
+internal fun selectRadioAudio(context: Context, target: IRadioTransport): RadioAudioControl? =
+    when (target) {
+        is MockTransport -> MockRadioAudioChannel(context)
+        is RfcommTransport -> RadioAudioChannel(context, target.deviceAddress)
+        else -> null
+    }
+
 @Singleton
 class RadioController internal constructor(
     @Volatile private var transport: IRadioTransport,
@@ -48,11 +59,7 @@ class RadioController internal constructor(
     private val context: Context,
     private val scope: CoroutineScope,
     private val focus: AudioFocusControl = AndroidRadioAudioFocus(context),
-    private val createAudio: (IRadioTransport) -> RadioAudioControl? = { target ->
-        (target as? com.hamradio.aaos.radio.transport.RfcommTransport)?.let {
-            RadioAudioChannel(context, it.deviceAddress)
-        }
-    },
+    private val createAudio: (IRadioTransport) -> RadioAudioControl? = { target -> selectRadioAudio(context, target) },
 ) {
     @Inject constructor(transport: IRadioTransport, transportFactory: RadioTransportFactory,
                         @ApplicationContext context: Context) :

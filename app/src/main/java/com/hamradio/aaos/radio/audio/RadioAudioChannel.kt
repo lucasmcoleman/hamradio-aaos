@@ -367,33 +367,11 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
         }
     }
 
-    private fun unescapeFrame(data: ByteArray, start: Int): ByteArray? {
-        val out = ByteArrayOutputStream(data.size - start)
-        var index = start
-        while (index < data.size) {
-            val value = data[index++].toInt() and 0xff
-            if (value == 0x7d) {
-                if (index == data.size) return null
-                out.write((data[index++].toInt() and 0xff) xor 0x20)
-            } else out.write(value)
-        }
-        return out.toByteArray()
-    }
+    private fun unescapeFrame(data: ByteArray, start: Int): ByteArray? =
+        AudioFraming.unescape(data, start)
 
-    private fun escapeFrame(cmd: Byte, data: ByteArray): ByteArray {
-        val out = ByteArrayOutputStream(data.size * 2 + 4)
-        out.write(0x7e)
-        out.write(cmd.toInt())
-        for (byte in data) {
-            val value = byte.toInt() and 0xff
-            if (value == 0x7e || value == 0x7d) {
-                out.write(0x7d)
-                out.write(value xor 0x20)
-            } else out.write(value)
-        }
-        out.write(0x7e)
-        return out.toByteArray()
-    }
+    private fun escapeFrame(cmd: Byte, data: ByteArray): ByteArray =
+        AudioFraming.escape(cmd, data)
 
     private fun close(socket: BluetoothSocket?) {
         try { socket?.close() } catch (_: IOException) {}
