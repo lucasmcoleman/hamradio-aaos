@@ -33,13 +33,16 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
-                // Restart activity when transport mode changes
-                LaunchedEffect(Unit) {
-                    vm.restartEvent.collect { recreate() }
-                }
                 AppNavigation(vm = vm)
             }
         }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // PTT is an on-screen control. Background mic capture isn't covered by the foreground service,
+        // so never keep transmitting once the app leaves the screen.
+        vm.pttUp()
     }
 
     override fun onDestroy() {

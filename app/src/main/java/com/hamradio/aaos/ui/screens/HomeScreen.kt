@@ -101,14 +101,14 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
     val channelA   by vm.activeChannelA.collectAsStateWithLifecycle()
     val channelB   by vm.activeChannelB.collectAsStateWithLifecycle()
     val volume     by vm.volume.collectAsStateWithLifecycle()
-    val isMock     = vm.isMockMode
+    val isMock     by vm.mockMode.collectAsStateWithLifecycle()
     val isVfoA     by vm.isVfoModeA.collectAsStateWithLifecycle()
     val isVfoB     by vm.isVfoModeB.collectAsStateWithLifecycle()
     val vfoA       by vm.vfoA.collectAsStateWithLifecycle()
     val vfoB       by vm.vfoB.collectAsStateWithLifecycle()
     var showConnectionSheet by remember { mutableStateOf(false) }
     val pttSlot    by vm.activeSlot.collectAsStateWithLifecycle()
-    val pttKeyed   by vm.pttKeyed.collectAsStateWithLifecycle()
+    val pttActive  by vm.pttActive.collectAsStateWithLifecycle()
     var showVfoEditor by remember { mutableStateOf<String?>(null) }
 
     if (showConnectionSheet) {
@@ -208,7 +208,7 @@ fun HomeScreen(vm: MainViewModel, onNavigateToChannels: () -> Unit) {
             // PTT button
             val pttToggleMode by vm.pttToggleMode.collectAsStateWithLifecycle()
             PttButton(
-                isTransmitting = htStatus.isInTx || pttKeyed,
+                isTransmitting = htStatus.isInTx || pttActive,
                 toggleMode     = pttToggleMode,
                 onPttDown      = { vm.pttDown() },
                 onPttUp        = { vm.pttUp() },
@@ -998,7 +998,7 @@ private fun ConnectionSheet(
     onDismiss: () -> Unit,
 ) {
     val connState by vm.connectionState.collectAsStateWithLifecycle()
-    val isMock = vm.isMockMode
+    val isMock by vm.mockMode.collectAsStateWithLifecycle()
     var addressText by remember { mutableStateOf("") }
 
     ModalBottomSheet(

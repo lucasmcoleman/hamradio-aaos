@@ -1,12 +1,14 @@
 package com.hamradio.aaos.vm
 
 /**
- * Tracks whether the app has keyed the radio, so PTT down/up are sent exactly once per press.
+ * Tracks whether the user is holding (or has toggled on) PTT, so each press sends one start and
+ * one stop request to RadioController.
  *
- * Both edges currently send the same PF_MAIN_PTT command, so a duplicate down (a second tap,
- * a recomposed button) or a duplicate up would flip the radio's state instead of confirming it.
- * The latch drops the duplicate. When the radio reports that TX ended on its own (its timeout,
- * a dropped link), the latch clears without sending anything.
+ * The controller starts and stops mic streaming explicitly and ignores repeats, so the latch is
+ * about the UI: it collapses duplicate requests (a second tap, the gesture-cancel release plus the
+ * screen-dispose release) and lets toggle mode know which request comes next. It's fed
+ * RadioController.isPttActive; when transmit ends on its own (app timeout, focus loss, dropped
+ * link), the latch clears without sending anything.
  */
 class PttLatch(
     private val sendDown: () -> Unit,

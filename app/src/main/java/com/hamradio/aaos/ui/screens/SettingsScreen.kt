@@ -50,9 +50,8 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
     val txRoute    by vm.txMicRoute.collectAsStateWithLifecycle()
     val autoSwitch by vm.autoSwitchOnRx.collectAsStateWithLifecycle()
     val pttToggle  by vm.pttToggleMode.collectAsStateWithLifecycle()
-    val isMock   = vm.isMockMode
+    val isMock   by vm.mockMode.collectAsStateWithLifecycle()
     var showScanConfirm by remember { mutableStateOf(false) }
-    var showRestartPrompt by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -198,7 +197,6 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
                     checked         = isMock,
                     onCheckedChange = {
                         vm.toggleMockMode()
-                        showRestartPrompt = true
                     },
                     colors          = SwitchDefaults.colors(checkedThumbColor = Accent, checkedTrackColor = Accent.copy(0.4f)),
                 )
@@ -211,18 +209,6 @@ fun SettingsScreen(vm: MainViewModel, onOpenDebug: () -> Unit = {}) {
         }
     }
 
-    if (showRestartPrompt) {
-        AlertDialog(
-            onDismissRequest = { showRestartPrompt = false },
-            title = { Text("Restart Required") },
-            text  = { Text("Please restart the app for the transport change to take effect.") },
-            confirmButton = {
-                TextButton(onClick = { showRestartPrompt = false }) {
-                    Text("OK", color = Accent)
-                }
-            },
-        )
-    }
 
     if (showScanConfirm) {
         AlertDialog(

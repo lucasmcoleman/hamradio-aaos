@@ -17,7 +17,6 @@ import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.protocol.SubAudio
 import com.hamradio.aaos.radio.transport.ConnectionState
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -57,15 +56,15 @@ class MainViewModel @Inject constructor(
 
     /** PTT as the app requested it. Drops duplicate down/up so one press sends one of each. */
     private val pttLatch = PttLatch(sendDown = { radio.pttDown() }, sendUp = { radio.pttUp() })
-    private val _pttKeyed = MutableStateFlow(false)
-    val pttKeyed: StateFlow<Boolean> = _pttKeyed.asStateFlow()
+    /** True while the controller is actually capturing and streaming mic audio. */
+    val pttActive: StateFlow<Boolean> = radio.isPttActive
 
     /** Slot ("A"/"B") PTT and the power selector act on. Lives here so it survives tab changes. */
     private val _activeSlot = MutableStateFlow("A")
     val activeSlot: StateFlow<String> = _activeSlot.asStateFlow()
 
     /** True when mock transport is active. */
-    val isMockMode: Boolean get() = prefs.useMockRadio
+    val isMockMode: Boolean get() = _isMockMode.value
 
     // Audio routing preferences — observable StateFlows for UI recomposition
     private val _rxAudioRoute = MutableStateFlow(prefs.rxAudioRoute)
@@ -110,9 +109,10 @@ class MainViewModel @Inject constructor(
     }
 
     init {
-        // Clear the PTT latch if the radio stops transmitting on its own (timeout, dropped link).
+        // Clear the PTT latch when the controller stops transmitting on its own (timeout, focus loss,
+        // dropped link). htStatus.isInTx isn't used: it can stay false while capture is starting.
         viewModelScope.launch {
-            htStatus.collect { st -> if (pttLatch.onRadioTx(st.isInTx)) _pttKeyed.value = false }
+            radio.isPttActive.collect { active -> pttLatch.onRadioTx(active) }
         }
 
         // Follow the radio's active slot when idle; when receiving, optionally switch to the
@@ -283,8 +283,8 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun pttDown() { if (pttLatch.down()) _pttKeyed.value = true }
-    fun pttUp()   { if (pttLatch.up()) _pttKeyed.value = false }
+    fun pttDown() { pttLatch.down() }
+    fun pttUp()   { pttLatch.up() }
     fun pttToggle() { if (pttLatch.keyed) pttUp() else pttDown() }
 
     fun saveChannel(channel: RfChannel) = radio.saveChannel(channel)
@@ -319,23 +319,35 @@ class MainViewModel @Inject constructor(
 
     fun clearLog() = radio.clearLog()
 
-    /** Signals the Activity to recreate itself. The transport is a process-wide singleton, so this does
-     *  not swap it; a new device or mock setting takes effect only after the app process restarts. */
-    private val _restartEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    val restartEvent: kotlinx.coroutines.flow.Flow<Unit> = _restartEvent
+    private val _isMockMode = MutableStateFlow(prefs.useMockRadio)
+    /** Observable mock flag, so screens update when the transport is swapped. */
+    val mockMode: StateFlow<Boolean> = _isMockMode.asStateFlow()
 
     fun toggleMockMode() {
-        radio.disconnect()
         prefs.useMockRadio = !prefs.useMockRadio
-        viewModelScope.launch { _restartEvent.emit(Unit) }
+        _isMockMode.value = prefs.useMockRadio
+        switchTransport()
     }
 
-    /** Save the device address and signal a restart. The new address is used after the process restarts (see restartEvent). */
+    /** Save the device address and connect to it now. */
     fun connectToDevice(address: String) {
-        radio.disconnect()
         prefs.deviceAddress = address
         prefs.useMockRadio = false
-        _restartEvent.tryEmit(Unit)
+        _isMockMode.value = false
+        switchTransport()
+    }
+
+    /** The controller stops the old session (PTT, audio, reconnect) before starting the new one. */
+    private fun switchTransport() {
+        val address = prefs.deviceAddress
+        val mock = prefs.useMockRadio
+        viewModelScope.launch {
+            try {
+                radio.switchTransport(address ?: "", mock)
+            } catch (e: Exception) {
+                android.util.Log.w("MainViewModel", "switchTransport failed", e)
+            }
+        }
     }
 
     companion object {
