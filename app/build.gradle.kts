@@ -17,12 +17,12 @@ if (keystorePropertiesFile.exists()) {
 
 android {
     namespace = "com.hamradio.aaos"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.kk4fvc.benshiradiocontrol"
         minSdk = 29
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 29
         versionName = "1.2.1"
     }

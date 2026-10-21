@@ -18,7 +18,8 @@ private const val NOTIFICATION_ID = 1
 
 /**
  * Foreground service that keeps the app process alive while a radio is connected, so the
- * Bluetooth link and audio keep running when another app (Maps) is in front.
+ * Bluetooth control link keeps running when another app (Maps) is in front. It does not cover
+ * microphone capture in the background; that needs the microphone service type and is not wired.
  *
  * It holds no radio state itself: RadioController is a process-wide singleton, and this service
  * only stops Android from treating the process as background. MainActivity starts it when the link
