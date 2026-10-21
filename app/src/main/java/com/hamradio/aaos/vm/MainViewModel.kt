@@ -291,7 +291,7 @@ class MainViewModel @Inject constructor(
         viewModelScope.launch { _restartEvent.emit(Unit) }
     }
 
-    /** Set device address and restart to reinject transport with new address. */
+    /** Save the device address and signal a restart. The new address is used after the process restarts (see restartEvent). */
     fun connectToDevice(address: String) {
         radio.disconnect()
         prefs.deviceAddress = address
