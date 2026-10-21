@@ -63,12 +63,6 @@ class MainViewModel @Inject constructor(
     val rxAudioRoute: StateFlow<Int> = _rxAudioRoute.asStateFlow()
     private val _txMicRoute = MutableStateFlow(prefs.txMicRoute)
     val txMicRoute: StateFlow<Int> = _txMicRoute.asStateFlow()
-    private val _showDebugTab = MutableStateFlow(prefs.showDebugTab)
-    val showDebugTab: StateFlow<Boolean> = _showDebugTab.asStateFlow()
-    fun setShowDebugTab(enabled: Boolean) {
-        prefs.showDebugTab = enabled
-        _showDebugTab.value = enabled
-    }
 
     private val _autoSwitchOnRx = MutableStateFlow(prefs.autoSwitchOnRx)
     val autoSwitchOnRx: StateFlow<Boolean> = _autoSwitchOnRx.asStateFlow()
@@ -251,8 +245,6 @@ class MainViewModel @Inject constructor(
         }
     }
 
-    fun setPower(on: Boolean) = radio.setHtPower(on)
-
     fun pttDown() = radio.pttDown()
     fun pttUp()   = radio.pttUp()
 
@@ -275,10 +267,6 @@ class MainViewModel @Inject constructor(
         ))
     }
 
-    fun toggleChannelMute(channelId: Int) {
-        val ch = channels.value.firstOrNull { it.channelId == channelId } ?: return
-        radio.saveChannel(ch.copy(mute = !ch.mute))
-    }
 
     fun refreshChannels() = radio.refreshChannels()
 
@@ -292,8 +280,8 @@ class MainViewModel @Inject constructor(
 
     fun clearLog() = radio.clearLog()
 
-    /** Toggle between mock and real BLE transport (requires reconnect). */
-    /** Signals the Activity to recreate itself so Hilt re-injects the transport. */
+    /** Signals the Activity to recreate itself. The transport is a process-wide singleton, so this does
+     *  not swap it; a new device or mock setting takes effect only after the app process restarts. */
     private val _restartEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val restartEvent: kotlinx.coroutines.flow.Flow<Unit> = _restartEvent
 
@@ -301,10 +289,6 @@ class MainViewModel @Inject constructor(
         radio.disconnect()
         prefs.useMockRadio = !prefs.useMockRadio
         viewModelScope.launch { _restartEvent.emit(Unit) }
-    }
-
-    fun setDeviceAddress(address: String) {
-        prefs.deviceAddress = address
     }
 
     /** Set device address and restart to reinject transport with new address. */

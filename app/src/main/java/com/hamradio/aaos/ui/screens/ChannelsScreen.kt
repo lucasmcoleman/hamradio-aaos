@@ -2,7 +2,6 @@ package com.hamradio.aaos.ui.screens
 
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -35,11 +34,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.hamradio.aaos.radio.protocol.ModulationType
 import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.ui.components.ChannelCard
 import com.hamradio.aaos.ui.theme.Accent
@@ -111,7 +108,7 @@ fun ChannelsScreen(vm: MainViewModel) {
                 IconButton(onClick = {
                     val nextId = (channels.maxOfOrNull { it.channelId } ?: -1) + 1
                     vm.addNewChannel(nextId)
-                    // Open editor for the new channel after a brief delay for state to propagate
+                    // Open the editor on the channel just added
                     editingChannel = RfChannel(
                         channelId = nextId,
                         name = "CH%02d".format(nextId),

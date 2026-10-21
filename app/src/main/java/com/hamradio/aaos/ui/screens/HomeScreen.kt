@@ -32,7 +32,6 @@ import androidx.compose.material.icons.filled.GpsNotFixed
 import androidx.compose.material.icons.filled.GpsOff
 import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -49,7 +48,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.runtime.Composable
@@ -71,14 +69,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.platform.LocalContext
-import com.hamradio.aaos.radio.protocol.BandwidthType
 import com.hamradio.aaos.radio.transport.BleScanner
 import com.hamradio.aaos.radio.protocol.HtStatus
 import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.protocol.SubAudio
 import com.hamradio.aaos.vm.MainViewModel.VfoState
 import com.hamradio.aaos.radio.transport.ConnectionState
-import com.hamradio.aaos.ui.components.BatteryIndicator
 import com.hamradio.aaos.ui.components.SignalMeter
 import com.hamradio.aaos.ui.components.TxRxIndicator
 import com.hamradio.aaos.ui.components.VolumeSlider
@@ -899,10 +895,6 @@ private fun VfoEditorSheet(
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Frequency input dialog — writes to the channel via WRITE_RF_CH
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // PTT Button — press-and-hold to transmit

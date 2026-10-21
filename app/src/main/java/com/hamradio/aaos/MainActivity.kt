@@ -5,7 +5,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.runtime.LaunchedEffect
-import androidx.core.view.WindowCompat
 import com.hamradio.aaos.ui.AppNavigation
 import com.hamradio.aaos.ui.theme.HamRadioTheme
 import com.hamradio.aaos.vm.MainViewModel
