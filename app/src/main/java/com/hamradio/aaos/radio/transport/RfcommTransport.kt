@@ -9,9 +9,11 @@ import com.hamradio.aaos.radio.protocol.BenshiMessage
 import com.hamradio.aaos.radio.protocol.GaiaFrame
 import com.hamradio.aaos.radio.protocol.RadioCommands
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -20,29 +22,25 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 private const val TAG = "RfcommTransport"
-
-// Standard SPP (Serial Port Profile) UUID
 private val SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
 /**
- * Classic Bluetooth RFCOMM transport for Benshi-protocol radios.
- *
- * Messages are wrapped in GAIA frames (sync + version + flags + length + payload).
- * The radio exposes an SPP serial port that accepts GAIA-framed Benshi commands.
- *
- * Connection flow:
- * 1. Get BluetoothDevice by MAC address
- * 2. Create RFCOMM socket via SPP UUID
- * 3. Connect socket (blocks until connected or fails)
- * 4. Start read loop on input stream
- * 5. Send commands by writing GAIA-framed bytes to output stream
+ * Classic Bluetooth RFCOMM transport for GAIA-framed Benshi messages.
+ * Each connect attempt owns its resources before blocking in BluetoothSocket.connect.
+ * The controller owns reconnection; this transport never schedules retries.
  */
 @SuppressLint("MissingPermission")
 class RfcommTransport(
@@ -50,221 +48,213 @@ class RfcommTransport(
     val deviceAddress: String,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : IRadioTransport {
+    // Identity is the generation token. Detached attempts may only close their own resources.
+    private class Connection {
+        var socket: BluetoothSocket? = null
+        var output: OutputStream? = null
+        var reader: Job? = null
+        val writes = Mutex()
+        val receiveBuffer = ByteArrayOutputStream(1024)
+    }
 
-    private var socket: BluetoothSocket? = null
-    private var inputStream: InputStream? = null
-    private var outputStream: OutputStream? = null
-    private var readJob: Job? = null
-
+    private val ownership = Any()
+    private var current: Connection? = null
     private val _state = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState = _state.asStateFlow()
-
     private val _inbound = MutableSharedFlow<BenshiMessage>(extraBufferCapacity = 64)
     override val inboundMessages: Flow<BenshiMessage> = _inbound.asSharedFlow()
-
     override val isConnected: Boolean get() = _state.value == ConnectionState.CONNECTED
 
-    // Receive buffer for GAIA frame reassembly
-    private val receiveBuffer = java.io.ByteArrayOutputStream(1024)
-
-    override suspend fun connect() = withContext(Dispatchers.IO) {
-        try {
-            // Clean up any previous connection
-            readJob?.cancel()
-            readJob = null
-            closeSocket()
-            receiveBuffer.reset()
-
-            _state.value = ConnectionState.CONNECTING
-
-            val btManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
-            val adapter = btManager?.adapter
-            if (adapter == null) {
-                Log.e(TAG, "BluetoothAdapter not available")
-                _state.value = ConnectionState.ERROR
-                return@withContext
+    override suspend fun connect(): Unit = withContext(Dispatchers.IO) {
+        suspendCancellableCoroutine { continuation ->
+            val attempt = Connection()
+            val previous = synchronized(ownership) {
+                val old = current
+                current = attempt
+                _state.value = ConnectionState.CONNECTING
+                old
             }
-
-            // Cancel any ongoing discovery (it slows down connection)
-            adapter.cancelDiscovery()
-
-            val device = adapter.getRemoteDevice(deviceAddress)
-            Log.i(TAG, "Connecting to ${device.name ?: "unknown"} ($deviceAddress) via RFCOMM")
-
-            // Try SPP UUID first, fall back to insecure connection
-            val sock = try {
-                device.createRfcommSocketToServiceRecord(SPP_UUID)
+            // Coroutine cancellation must close the socket even while connect() blocks.
+            continuation.invokeOnCancellation { finish(attempt, ConnectionState.DISCONNECTED) }
+            previous?.let { close(it) }
+            try {
+                if (!continuation.isActive || !owns(attempt)) return@suspendCancellableCoroutine
+                val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                val adapter = manager?.adapter ?: throw IOException("BluetoothAdapter not available")
+                adapter.cancelDiscovery()
+                val device = adapter.getRemoteDevice(deviceAddress)
+                val socket = try {
+                    device.createRfcommSocketToServiceRecord(SPP_UUID)
+                } catch (e: IOException) {
+                    Log.w(TAG, "SPP socket creation failed, trying insecure fallback", e)
+                    device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                }
+                val attached = synchronized(ownership) {
+                    if (current === attempt && continuation.isActive) {
+                        attempt.socket = socket
+                        true
+                    } else false
+                }
+                if (!attached) {
+                    try { socket.close() } catch (_: IOException) {}
+                } else {
+                    socket.connect()
+                    val input = socket.inputStream
+                    val output = socket.outputStream
+                    val reader = scope.launch(start = CoroutineStart.LAZY) { readLoop(attempt, input) }
+                    val published = synchronized(ownership) {
+                        if (current === attempt && continuation.isActive) {
+                            attempt.output = output
+                            attempt.reader = reader
+                            _state.value = ConnectionState.CONNECTED
+                            true
+                        } else false
+                    }
+                    if (published) {
+                        reader.invokeOnCompletion { finish(attempt, ConnectionState.ERROR) }
+                        reader.start()
+                        Log.i(TAG, "RFCOMM connected to $deviceAddress")
+                    } else {
+                        reader.cancel()
+                        close(attempt)
+                    }
+                }
             } catch (e: IOException) {
-                Log.w(TAG, "SPP UUID failed, trying insecure fallback", e)
-                device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                Log.e(TAG, "RFCOMM connect failed: ${e.message}")
+                finish(attempt, ConnectionState.ERROR)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "Missing Bluetooth permission", e)
+                finish(attempt, ConnectionState.ERROR)
+            } catch (e: IllegalArgumentException) {
+                Log.e(TAG, "Invalid Bluetooth device address", e)
+                finish(attempt, ConnectionState.ERROR)
+            } finally {
+                if (continuation.isActive) continuation.resume(Unit)
             }
-
-            sock.connect()  // Blocking call — waits for radio to accept
-            socket = sock
-            inputStream = sock.inputStream
-            outputStream = sock.outputStream
-
-            _state.value = ConnectionState.CONNECTED
-            Log.i(TAG, "RFCOMM connected to $deviceAddress")
-
-            // Start reading incoming GAIA frames
-            readJob = scope.launch { readLoop() }
-
-        } catch (e: IOException) {
-            Log.e(TAG, "RFCOMM connect failed: ${e.message}")
-            closeSocket()
-            _state.value = ConnectionState.ERROR
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Missing Bluetooth permission", e)
-            _state.value = ConnectionState.ERROR
         }
     }
 
     override suspend fun send(message: BenshiMessage) {
-        if (!isConnected) return
-        val frame = GaiaFrame.encode(message)
-        withContext(Dispatchers.IO) {
-            try {
-                outputStream?.write(frame)
-                outputStream?.flush()
-            } catch (e: IOException) {
-                Log.e(TAG, "RFCOMM write failed: ${e.message}")
-                handleDisconnect()
+        val connection = synchronized(ownership) {
+            current?.takeIf { _state.value == ConnectionState.CONNECTED }
+        } ?: return
+        try {
+            write(connection, GaiaFrame.encode(message))
+        } catch (e: IOException) {
+            Log.e(TAG, "RFCOMM write failed: ${e.message}")
+            finish(connection, ConnectionState.ERROR)
+        }
+    }
+
+    private suspend fun write(connection: Connection, bytes: ByteArray) = withContext(Dispatchers.IO) {
+        // Ping and normal commands use the same mutex, including flush.
+        connection.writes.withLock {
+            val output = synchronized(ownership) {
+                if (current === connection && _state.value == ConnectionState.CONNECTED) connection.output else null
+            } ?: return@withLock
+            suspendCancellableCoroutine<Unit> { continuation ->
+                // A coroutine timeout alone cannot interrupt a blocking Bluetooth write.
+                // Closing this session aborts its IO without touching a replacement session.
+                continuation.invokeOnCancellation { finish(connection, ConnectionState.ERROR) }
+                if (continuation.isActive) {
+                    try {
+                        output.write(bytes)
+                        output.flush()
+                        if (continuation.isActive) continuation.resume(Unit)
+                    } catch (e: IOException) {
+                        if (continuation.isActive) continuation.resumeWithException(e)
+                    }
+                }
             }
         }
     }
 
     override suspend fun disconnect() {
-        readJob?.cancel()
-        readJob = null
-        closeSocket()
-        _state.value = ConnectionState.DISCONNECTED
+        val connection = synchronized(ownership) {
+            val old = current
+            current = null
+            _state.value = ConnectionState.DISCONNECTED
+            old
+        }
+        connection?.let { close(it) }
         Log.i(TAG, "RFCOMM disconnected")
     }
 
-    // -----------------------------------------------------------------------
-    // Read loop — parses GAIA frames from the RFCOMM input stream
-    // -----------------------------------------------------------------------
-
-    private suspend fun readLoop() {
+    private suspend fun readLoop(connection: Connection, input: InputStream) {
         val buf = ByteArray(1024)
         var idleCount = 0
         try {
-            while (scope.isActive) {
-                val stream = inputStream ?: break
-                val available = withContext(Dispatchers.IO) { stream.available() }
+            while (currentCoroutineContext().isActive && owns(connection)) {
+                val available = withContext(Dispatchers.IO) { input.available() }
                 if (available > 0) {
                     idleCount = 0
                     val bytesRead = withContext(Dispatchers.IO) {
-                        stream.read(buf, 0, minOf(available, buf.size))
+                        input.read(buf, 0, minOf(available, buf.size))
                     }
-                    if (bytesRead == -1) {
-                        Log.w(TAG, "RFCOMM stream ended")
-                        break
-                    }
+                    if (bytesRead == -1) break
                     if (bytesRead > 0) {
-                        receiveBuffer.write(buf, 0, bytesRead)
-                        processReceiveBuffer()
+                        connection.receiveBuffer.write(buf, 0, bytesRead)
+                        processReceiveBuffer(connection)
                     }
                 } else {
-                    delay(100) // poll every 100ms
-                    idleCount++
-                    if (idleCount >= 100) {
-                        // 10 seconds idle — ping the radio
+                    delay(100)
+                    if (++idleCount >= 100) {
                         idleCount = 0
-                        try {
-                            val ping = GaiaFrame.encode(RadioCommands.getHtStatus())
-                            withContext(Dispatchers.IO) {
-                                outputStream?.write(ping)
-                                outputStream?.flush()
-                            }
-                        } catch (e: IOException) {
-                            Log.w(TAG, "Ping failed — radio disconnected: ${e.message}")
-                            break
-                        }
+                        write(connection, GaiaFrame.encode(RadioCommands.getHtStatus()))
                     }
                 }
             }
         } catch (e: IOException) {
-            if (scope.isActive) {
-                Log.e(TAG, "RFCOMM read error: ${e.message}")
-            }
+            if (owns(connection)) Log.e(TAG, "RFCOMM read/ping error: ${e.message}")
+        } finally {
+            // A stale reader cannot tear down or change the state of a newer attempt.
+            finish(connection, ConnectionState.ERROR)
         }
-        handleDisconnect()
     }
 
-    private fun processReceiveBuffer() {
-        val data = receiveBuffer.toByteArray()
+    private fun processReceiveBuffer(connection: Connection) {
+        val buffer = connection.receiveBuffer
+        val data = buffer.toByteArray()
         var offset = 0
-
         while (offset < data.size) {
             val (consumed, message) = GaiaFrame.decode(data, offset)
-
             when {
-                consumed > 0 && message != null -> {
-                    // Successfully decoded a frame
-                    _inbound.tryEmit(message)
-                    offset += consumed
-                }
                 consumed > 0 -> {
-                    // Consumed bytes but no valid message (corrupted frame)
+                    if (message != null) synchronized(ownership) {
+                        if (current === connection) _inbound.tryEmit(message)
+                    }
                     offset += consumed
                 }
-                consumed == 0 -> {
-                    // Incomplete frame — keep remaining bytes for next read
-                    break
-                }
-                else -> {
-                    // Sync error — skip bytes to next sync byte
-                    offset += -consumed
-                }
+                consumed == 0 -> break
+                else -> offset += -consumed
             }
         }
-
-        // Keep unconsumed bytes in the buffer
-        receiveBuffer.reset()
-        if (offset < data.size) {
-            receiveBuffer.write(data, offset, data.size - offset)
-        }
+        buffer.reset()
+        if (offset < data.size) buffer.write(data, offset, data.size - offset)
     }
 
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
+    private fun owns(connection: Connection): Boolean = synchronized(ownership) { current === connection }
 
-    private fun handleDisconnect() {
-        if (_state.value == ConnectionState.CONNECTED || _state.value == ConnectionState.CONNECTING) {
-            _state.value = ConnectionState.ERROR
-            closeSocket()
-            // Start auto-reconnect
-            scope.launch { autoReconnect() }
-        }
-    }
-
-    private suspend fun autoReconnect() {
-        Log.i(TAG, "Auto-reconnect started")
-        while (scope.isActive && _state.value == ConnectionState.ERROR) {
-            delay(5000)
-            if (_state.value != ConnectionState.ERROR) break
-            Log.i(TAG, "Attempting reconnect to $deviceAddress")
-            try {
-                connect()
-                if (_state.value == ConnectionState.CONNECTED) {
-                    Log.i(TAG, "Reconnected successfully")
-                    break
-                }
-            } catch (e: Exception) {
-                Log.d(TAG, "Reconnect attempt failed: ${e.message}")
+    private fun finish(connection: Connection, state: ConnectionState) {
+        synchronized(ownership) {
+            if (current === connection) {
+                current = null
+                _state.value = state
             }
         }
+        close(connection)
     }
 
-    private fun closeSocket() {
-        try { inputStream?.close() } catch (_: IOException) {}
-        try { outputStream?.close() } catch (_: IOException) {}
-        try { socket?.close() } catch (_: IOException) {}
-        inputStream = null
-        outputStream = null
-        socket = null
+    private fun close(connection: Connection) {
+        val resources = synchronized(ownership) {
+            val pair = connection.reader to connection.socket
+            connection.reader = null
+            connection.socket = null
+            connection.output = null
+            pair
+        }
+        resources.first?.cancel()
+        // Closing BluetoothSocket also closes its streams and aborts connect/read/write.
+        try { resources.second?.close() } catch (_: IOException) {}
     }
 }

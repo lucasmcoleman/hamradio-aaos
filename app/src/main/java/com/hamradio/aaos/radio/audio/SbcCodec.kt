@@ -1,232 +1,217 @@
+/*
+ * Copyright 2026 Ylian Saint-Hilaire
+ * Licensed under the Apache License, Version 2.0.
+ * https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Mono/eight-subband Kotlin adaptation of HTCommander src/lib/sbc,
+ * source commit 09dfa3e. See THIRD_PARTY_SBC.md for provenance and modifications.
+ */
 package com.hamradio.aaos.radio.audio
 
-import kotlin.math.cos
-import kotlin.math.PI
-import kotlin.math.max
-import kotlin.math.min
-
-/**
- * Minimal SBC encoder/decoder for Benshi radio audio.
- *
- * Fixed configuration matching the radio's audio channel:
- * - 32 kHz sample rate
- * - Mono
- * - 16 blocks
- * - 8 subbands
- * - Loudness bit allocation
- * - Bitpool 18
- *
- * Reference: A2DP spec, Bluetooth SIG
- */
-object SbcCodec {
-
-    // SBC header sync word
-    const val SBC_SYNCWORD = 0x9C.toByte()
-
-    // Fixed config for Benshi radios
-    const val FREQUENCY = 2        // 32 kHz (0=16k, 1=32k... wait: 0=16k, 1=32k, 2=44.1k, 3=48k)
-    // Actually: 0=16kHz, 1=32kHz, 2=44.1kHz, 3=48kHz
-    const val FREQ_32K = 1
-    const val BLOCKS = 16
-    const val MODE_MONO = 0
-    const val ALLOCATION_LOUDNESS = 1
-    const val SUBBANDS = 8
-    const val BITPOOL = 18
-
-    // Derived constants
-    const val SAMPLES_PER_FRAME = BLOCKS * SUBBANDS  // 128 samples
-    const val PCM_BYTES_PER_FRAME = SAMPLES_PER_FRAME * 2  // 256 bytes (16-bit mono)
-
-    // Precomputed analysis filter coefficients for 8 subbands
-    private val analysisFilter: Array<DoubleArray> = Array(8) { k ->
-        DoubleArray(80) { i ->
-            val proto = protoCoeffs8[i]
-            proto * cos((k + 0.5) * (i - 3.5) * PI / 8.0)
-        }
+/** Fixed 32 kHz mono SBC, 16 blocks, eight subbands, loudness, TX bitpool 18. */
+class SbcCodecSession {
+    companion object {
+        const val SBC_SYNCWORD = 0x9C.toByte()
+        const val FREQ_32K = 1
+        const val BLOCKS = 16
+        const val MODE_MONO = 0
+        const val ALLOCATION_LOUDNESS = 0
+        const val SUBBANDS = 8
+        const val BITPOOL = 18
+        const val SAMPLES_PER_FRAME = BLOCKS * SUBBANDS
+        const val PCM_BYTES_PER_FRAME = SAMPLES_PER_FRAME * 2
     }
 
-    // SBC prototype filter coefficients for 8 subbands (from Bluetooth SIG spec)
-    private val protoCoeffs8 = doubleArrayOf(
-        0.00000000E+00, 1.56575398E-04, 3.43256425E-04, 5.54620202E-04,
-        8.23919506E-04, 1.13992507E-03, 1.47640169E-03, 1.78371725E-03,
-        2.01182542E-03, 2.10371989E-03, 1.99454554E-03, 1.61656283E-03,
-        9.02154502E-04, -1.78805361E-04, -1.64973098E-03, -3.49717454E-03,
-        5.65949473E-03, 8.02941163E-03, 1.04584443E-02, 1.27472335E-02,
-        1.46525263E-02, 1.59045603E-02, 1.62208471E-02, 1.53184106E-02,
-        1.29371806E-02, 8.85757540E-03, 2.92408442E-03, -4.91578024E-03,
-        -1.46404076E-02, -2.61098752E-02, -3.90751381E-02, -5.31873032E-02,
-        6.79989431E-02, 8.29847578E-02, 9.75753918E-02, 1.11196689E-01,
-        1.23264548E-01, 1.33264415E-01, 1.40753505E-01, 1.45389847E-01,
-        1.46955068E-01, 1.45389847E-01, 1.40753505E-01, 1.33264415E-01,
-        1.23264548E-01, 1.11196689E-01, 9.75753918E-02, 8.29847578E-02,
-        -6.79989431E-02, -5.31873032E-02, -3.90751381E-02, -2.61098752E-02,
-        -1.46404076E-02, -4.91578024E-03, 2.92408442E-03, 8.85757540E-03,
-        1.29371806E-02, 1.53184106E-02, 1.62208471E-02, 1.59045603E-02,
-        1.46525263E-02, 1.27472335E-02, 1.04584443E-02, 8.02941163E-03,
-        -5.65949473E-03, -3.49717454E-03, -1.64973098E-03, -1.78805361E-04,
-        9.02154502E-04, 1.61656283E-03, 1.99454554E-03, 2.10371989E-03,
-        2.01182542E-03, 1.78371725E-03, 1.47640169E-03, 1.13992507E-03,
-        8.23919506E-04, 5.54620202E-04, 3.43256425E-04, 1.56575398E-04,
-    )
+    private var encoderIndex = 0
+    private val analysis = Array(2) { Array(8) { IntArray(5) } }
+    private val analysisPrevious = LongArray(4)
+    private var decoderIndex = 0
+    private val synthesis = Array(2) { Array(8) { IntArray(10) } }
 
-    // Sliding window for analysis filter
-    private val analysisBuffer = DoubleArray(80)
+    /** Begin a new PCM stream; do not reset between contiguous frames. */
+    @Synchronized
+    fun resetEncoder() {
+        encoderIndex = 0
+        analysis.forEach { half -> half.forEach { it.fill(0) } }
+        analysisPrevious.fill(0)
+    }
 
-    /**
-     * Encode a single SBC frame from PCM samples.
-     *
-     * @param pcm 128 mono 16-bit PCM samples (256 bytes as ShortArray)
-     * @return encoded SBC frame bytes, or null on error
-     */
+    /** Begin a new SBC stream; invalid frames never mutate synthesis state. */
+    @Synchronized
+    fun resetDecoder() {
+        decoderIndex = 0
+        synthesis.forEach { half -> half.forEach { it.fill(0) } }
+    }
+
+    private fun saturate(value: Long): Int = value.coerceIn(-32768L, 32767L).toInt()
+
+    @Synchronized
     fun encode(pcm: ShortArray): ByteArray? {
         if (pcm.size < SAMPLES_PER_FRAME) return null
-
-        // Analysis: compute subband samples
-        val sbSamples = Array(BLOCKS) { IntArray(SUBBANDS) }
-        for (blk in 0 until BLOCKS) {
-            // Shift analysis buffer
-            for (i in 79 downTo SUBBANDS) {
-                analysisBuffer[i] = analysisBuffer[i - SUBBANDS]
-            }
-            for (i in SUBBANDS - 1 downTo 0) {
-                analysisBuffer[SUBBANDS - 1 - i] = pcm[blk * SUBBANDS + i].toDouble()
-            }
-
-            // Apply analysis filter
-            for (sb in 0 until SUBBANDS) {
-                var sum = 0.0
-                for (i in 0 until 80) {
-                    sum += analysisFilter[sb][i] * analysisBuffer[i]
-                }
-                sbSamples[blk][sb] = (sum * 32768.0).toInt().coerceIn(-32768 * 32768, 32767 * 32768)
-            }
+        val samples = Array(BLOCKS) { analyze(pcm, it * SUBBANDS) }
+        val sf = IntArray(SUBBANDS) { sb ->
+            var magnitude = 0
+            for (block in samples) magnitude = magnitude or kotlin.math.abs(block[sb])
+            if (magnitude == 0) 0 else 31 - Integer.numberOfLeadingZeros(magnitude)
         }
-
-        // Compute scale factors
-        val scaleFactor = IntArray(SUBBANDS)
-        for (sb in 0 until SUBBANDS) {
-            var maxVal = 0
-            for (blk in 0 until BLOCKS) {
-                val v = if (sbSamples[blk][sb] < 0) -sbSamples[blk][sb] else sbSamples[blk][sb]
-                if (v > maxVal) maxVal = v
-            }
-            var sf = 0
-            while ((maxVal shr (sf + 1)) > 0 && sf < 30) sf++
-            scaleFactor[sb] = sf
-        }
-
-        // Bit allocation (loudness)
-        val bits = loudnessBitAllocation(scaleFactor, BITPOOL)
-
-        // Quantize
-        val quantized = Array(BLOCKS) { blk ->
+        val bits = loudnessBitAllocation(sf, BITPOOL)
+        val quantized = Array(BLOCKS) { block ->
             IntArray(SUBBANDS) { sb ->
-                if (bits[sb] > 0) {
-                    val levels = (1 shl bits[sb]) - 1
-                    val sf = scaleFactor[sb]
-                    val sample = sbSamples[blk][sb]
-                    val normalized = (sample.toDouble() / (1 shl sf).toDouble() + 1.0) / 2.0
-                    (normalized * levels + 0.5).toInt().coerceIn(0, levels)
-                } else 0
+                val levels = (1 shl bits[sb]) - 1
+                ((((samples[block][sb].toLong() * levels) shr (sf[sb] + 1)) + levels) shr 1).toInt()
             }
         }
-
-        // Pack into bitstream
-        return packFrame(scaleFactor, bits, quantized)
+        return packFrame(sf, bits, quantized)
     }
 
-    /**
-     * Decode an SBC frame to PCM samples.
-     * @return 128 mono 16-bit PCM samples, or null on error
-     */
-    // Synthesis filter buffer for decoding
-    private val synthesisBuffer = DoubleArray(160)
-
-    // Precomputed synthesis filter (transpose of analysis)
-    private val synthesisFilter: Array<DoubleArray> = Array(8) { k ->
-        DoubleArray(80) { i ->
-            val proto = protoCoeffs8[i]
-            proto * cos((k + 0.5) * (i - 3.5) * PI / 8.0) * SUBBANDS.toDouble()
+    private fun analyze(pcm: ShortArray, offset: Int): IntArray {
+        val index = encoderIndex shr 1
+        val odd = encoderIndex and 1
+        val inputIndex = if (index == 0) 0 else 5 - index
+        val order = intArrayOf(7, 3, 6, 0, 5, 1, 4, 2)
+        for (i in 0..7) analysis[odd][i][inputIndex] = pcm[offset + order[i]].toInt()
+        val first = LongArray(8) { i ->
+            var sum = 0L
+            for (j in 0..4) sum += analysis[odd][i][j].toLong() * SbcTables.analysisWindow[i][index + j]
+            sum
+        }
+        val y = longArrayOf(first[0] + analysisPrevious[0], first[2] + first[3],
+            first[4] + first[5], first[6] + first[7], analysisPrevious[1],
+            analysisPrevious[2], analysisPrevious[3], first[1])
+        analysisPrevious.fill(0)
+        for (j in 0..4) {
+            analysisPrevious[0] += analysis[odd][0][j].toLong() * SbcTables.analysisWindowB[0][index + j]
+            for (i in 1..3) {
+                analysisPrevious[i] += analysis[odd][2 * i][j].toLong() * SbcTables.analysisWindowB[2 * i][index + j] -
+                    analysis[odd][2 * i + 1][j].toLong() * SbcTables.analysisWindowB[2 * i + 1][index + j]
+            }
+        }
+        val windowed = IntArray(8) { saturate((y[it] + (1L shl 14)) shr 15) }
+        encoderIndex = (encoderIndex + 1) % 10
+        return IntArray(8) { i ->
+            var sum = 0L
+            for (j in 0..7) sum += windowed[j].toLong() * SbcTables.cosMatrix[i][j]
+            saturate((sum + (1L shl 12)) shr 13)
         }
     }
 
-    /**
-     * Decode an SBC frame to 128 mono 16-bit PCM samples.
-     * @return ShortArray of PCM samples, or null if invalid frame
-     */
+    @Synchronized
     fun decode(frame: ByteArray, offset: Int = 0): ShortArray? {
-        if (offset >= frame.size) return null
-        // Find SBC syncword
+        if (offset < 0 || offset >= frame.size) return null
         var pos = offset
         while (pos < frame.size && frame[pos] != SBC_SYNCWORD) pos++
-        if (pos >= frame.size) return null
-
-        val reader = ByteArrayBitReader(frame, pos)
-
-        // Header: syncword(8) + frequency(2) + blocks(2) + mode(2) + alloc(1) + subbands(1) + bitpool(8)
-        val sync = reader.read(8)
-        if (sync != 0x9C) return null
-        val freq = reader.read(2)
-        val blocksCode = reader.read(2)
-        val mode = reader.read(2)
-        val alloc = reader.read(1)
-        val subbandsCode = reader.read(1)
-        val bitpool = reader.read(8)
-
-        val nBlocks = when (blocksCode) { 0 -> 4; 1 -> 8; 2 -> 12; else -> 16 }
-        val nSubbands = if (subbandsCode == 0) 4 else 8
-
-        // Skip CRC
-        reader.read(8)
-
-        // Scale factors
-        val scaleFactor = IntArray(nSubbands) { reader.read(4) }
-
-        // Bit allocation
-        val bits = loudnessBitAllocation(scaleFactor, bitpool)
-
-        // Dequantize
-        val sbSamples = Array(nBlocks) { blk ->
-            DoubleArray(nSubbands) { sb ->
-                if (bits[sb] > 0) {
+        val length = frameLength(frame, pos) ?: return null
+        val reader = ByteArrayBitReader(frame.copyOfRange(pos, pos + length), 4)
+        val sf = IntArray(SUBBANDS) { reader.read(4) }
+        val bits = loudnessBitAllocation(sf, frame[pos + 2].toInt() and 0xFF)
+        val scale = 14 - sf.max()
+        val pcm = ShortArray(SAMPLES_PER_FRAME)
+        for (block in 0 until BLOCKS) {
+            val samples = IntArray(SUBBANDS) { sb ->
+                if (bits[sb] == 0) 0 else {
                     val raw = reader.read(bits[sb])
-                    val levels = (1 shl bits[sb]) - 1
-                    val normalized = (raw.toDouble() / levels) * 2.0 - 1.0
-                    normalized * (1 shl scaleFactor[sb]).toDouble()
-                } else 0.0
-            }
-        }
-
-        // Synthesis filter bank → PCM
-        val pcm = ShortArray(nBlocks * nSubbands)
-        for (blk in 0 until nBlocks) {
-            // Shift synthesis buffer
-            for (i in 159 downTo nSubbands) {
-                synthesisBuffer[i] = synthesisBuffer[i - nSubbands]
-            }
-            // Matrixing: multiply subband samples by synthesis filter
-            for (i in 0 until nSubbands) {
-                var sum = 0.0
-                for (sb in 0 until nSubbands) {
-                    sum += synthesisFilter[sb][i] * sbSamples[blk][sb]
+                    val sample = ((raw.toLong() shl 1) or 1L) * SbcTables.rangeScale[bits[sb] - 1]
+                    // Match the reference Int16List storage semantics before synthesis.
+                    ((sample - (1L shl 28)) shr (28 - (sf[sb] + 1 + scale))).toShort().toInt()
                 }
-                synthesisBuffer[i] = sum
             }
-            // Windowing + output
-            for (i in 0 until nSubbands) {
-                var sum = 0.0
-                for (j in 0 until 10) {
-                    val idx = j * nSubbands * 2 + i
-                    if (idx < synthesisBuffer.size && idx < protoCoeffs8.size) {
-                        sum += synthesisBuffer[idx] * protoCoeffs8[idx]
-                    }
-                }
-                val sample = (sum / 32768.0).coerceIn(-1.0, 1.0)
-                pcm[blk * nSubbands + i] = (sample * 32767).toInt().toShort()
-            }
+            synthesize(samples, scale, pcm, block * SUBBANDS)
         }
-
         return pcm
+    }
+
+    private fun synthesize(input: IntArray, scale: Int, pcm: ShortArray, offset: Int) {
+        val index = if (decoderIndex == 0) 0 else 10 - decoderIndex
+        val odd = index and 1
+        val c = SbcTables.cos16
+        val sums = LongArray(4) { (input[it].toLong() + input[7 - it]) shr 1 }
+        val diffs = LongArray(4) { (input[it].toLong() - input[7 - it]) shr 1 }
+        val s07 = sums[0]; val s16 = sums[1]; val s25 = sums[2]; val s34 = sums[3]
+        val d07 = diffs[0]; val d16 = diffs[1]; val d25 = diffs[2]; val d34 = diffs[3]
+        val a = longArrayOf(
+            (s07 + s34 - s25 - s16) * c[4],
+            d07 * c[5] - d16 * c[1] + d25 * c[7] + d34 * c[3],
+            (s07 - s34) * c[6] + (s25 - s16) * c[2],
+            d07 * c[7] - d16 * c[5] + d25 * c[3] - d34 * c[1],
+        )
+        val b = longArrayOf(
+            -d07 * c[3] + d16 * c[7] + d25 * c[1] + d34 * c[5],
+            (s34 - s07) * c[2] + (s25 - s16) * c[6],
+            -d07 * c[1] - d16 * c[3] - d25 * c[5] - d34 * c[7],
+            (-s07 - s34 - s25 - s16) shl 13,
+        )
+        val shift = 12 + scale
+        for (i in 0..3) {
+            a[i] = (a[i] + (1L shl (shift - 1))) shr shift
+            b[i] = (b[i] + (1L shl (shift - 1))) shr shift
+        }
+        val even = longArrayOf(a[0], a[1], a[2], a[3], 0, -a[3], -a[2], -a[1])
+        val other = longArrayOf(-a[0], b[0], b[1], b[2], b[3], b[2], b[1], b[0])
+        for (i in 0..7) {
+            synthesis[odd][i][index] = saturate(even[i])
+            synthesis[1 - odd][i][index] = saturate(other[i])
+        }
+        for (i in 0..7) {
+            var sum = 0L
+            for (j in 0..9) sum += synthesis[odd][i][j].toLong() * SbcTables.synthesisWindow[i][decoderIndex + j]
+            pcm[offset + i] = saturate((sum + (1L shl 12)) shr 13).toShort()
+        }
+        decoderIndex = (decoderIndex + 1) % 10
+    }
+
+    private fun loudnessBitAllocation(sf: IntArray, bitpool: Int): IntArray {
+        require(sf.size == SUBBANDS && bitpool in 2..(16 * SUBBANDS))
+        val offsets = intArrayOf(-3, 0, 0, 0, 0, 0, 1, 2) // 32 kHz, eight subbands
+        val needs = IntArray(8) { sb ->
+            val loudness = if (sf[sb] == 0) -5 else sf[sb] - offsets[sb]
+            if (loudness > 0) loudness shr 1 else loudness
+        }
+        var bitCount = 0
+        var slice = maxOf(0, needs.max()) + 1
+        var nextCount = 0
+        // Scale factors are 0..15 and the validated budget is at most 128.
+        while (nextCount < bitpool) {
+            val currentSlice = slice--
+            bitCount = nextCount
+            for (need in needs) {
+                if (need >= currentSlice && need < currentSlice + 15) nextCount++
+                if (need == currentSlice) nextCount++
+            }
+        }
+        val bits = IntArray(8) { sb ->
+            val n = needs[sb] - slice
+            if (n < 2) 0 else minOf(n, 16)
+        }
+        for (sb in 0..7) {
+            if (bitCount >= bitpool) break
+            val n = if (bits[sb] in 1..15) 1 else if (needs[sb] == slice + 1 && bitpool > bitCount + 1) 2 else 0
+            bits[sb] += n
+            bitCount += n
+        }
+        for (sb in 0..7) {
+            if (bitCount >= bitpool) break
+            if (bits[sb] < 16) { bits[sb]++; bitCount++ }
+        }
+        return bits
+    }
+
+    /**
+     * Length of a complete supported frame at exactly [offset], including CRC validation.
+     * Supports only 32 kHz, mono, 16 blocks, 8 subbands and loudness.
+     * CRC protects the header/scale factors, not the audio payload.
+     */
+    fun frameLength(frame: ByteArray, offset: Int = 0): Int? {
+        if (offset < 0 || offset > frame.size || frame.size - offset < 8) return null
+        if (frame[offset] != SBC_SYNCWORD) return null
+        val supportedHeader = (FREQ_32K shl 6) or (3 shl 4) or
+            (MODE_MONO shl 2) or (ALLOCATION_LOUDNESS shl 1) or 1
+        if ((frame[offset + 1].toInt() and 0xFF) != supportedHeader) return null
+        val bitpool = frame[offset + 2].toInt() and 0xFF
+        if (bitpool !in 2..(16 * SUBBANDS)) return null
+        val length = 4 + SUBBANDS / 2 + (BLOCKS * bitpool + 7) / 8
+        if (frame.size - offset < length) return null
+        if (frame[offset + 3] != computeCrc(frame, offset)) return null
+        return length
     }
 
     private class ByteArrayBitReader(private val data: ByteArray, startOffset: Int) {
@@ -237,57 +222,11 @@ object SbcCodec {
             for (i in 0 until numBits) {
                 val byteIdx = bitPos / 8
                 val bitIdx = 7 - (bitPos % 8)
-                if (byteIdx < data.size) {
-                    result = (result shl 1) or ((data[byteIdx].toInt() shr bitIdx) and 1)
-                } else {
-                    result = result shl 1
-                }
+                result = (result shl 1) or ((data[byteIdx].toInt() shr bitIdx) and 1)
                 bitPos++
             }
             return result
         }
-    }
-
-    private fun loudnessBitAllocation(sf: IntArray, bitpool: Int): IntArray {
-        val bits = IntArray(SUBBANDS)
-        // Loudness offset table for 8 subbands, mono
-        val offset = intArrayOf(-2, 0, 0, 0, 0, 0, 0, 1)
-
-        val loudness = IntArray(SUBBANDS) { max(0, sf[it] / 2 + offset[it]) }
-
-        var remaining = bitpool
-        var maxLoudness = loudness.max()
-
-        // Iterative bit allocation
-        var bitSlice = maxLoudness + 1
-        while (remaining > 0 && bitSlice > 0) {
-            bitSlice--
-            for (sb in 0 until SUBBANDS) {
-                if (remaining <= 0) break
-                if (loudness[sb] >= bitSlice && bits[sb] < 16) {
-                    if (bits[sb] == 0) {
-                        bits[sb] = 2
-                        remaining -= 2
-                    } else {
-                        bits[sb]++
-                        remaining--
-                    }
-                }
-            }
-        }
-
-        // If remaining bits, distribute evenly
-        while (remaining > 0) {
-            for (sb in 0 until SUBBANDS) {
-                if (remaining <= 0) break
-                if (bits[sb] < 16) {
-                    bits[sb]++
-                    remaining--
-                }
-            }
-        }
-
-        return bits
     }
 
     private fun packFrame(sf: IntArray, bits: IntArray, quantized: Array<IntArray>): ByteArray {
@@ -303,7 +242,6 @@ object SbcCodec {
         out.write(BITPOOL, 8)                  // bitpool
 
         // CRC (placeholder — compute later)
-        val crcPos = out.bitPos
         out.write(0, 8)
 
         // Scale factors (4 bits each for 8 subbands)
@@ -325,22 +263,21 @@ object SbcCodec {
 
         val result = out.toByteArray()
 
-        // Compute CRC over bytes 1..3 + scale factors
+        // Compute CRC over header bytes 1 and 2 plus scale factors
         result[3] = computeCrc(result)
 
         return result
     }
 
-    private fun computeCrc(frame: ByteArray): Byte {
+    private fun computeCrc(frame: ByteArray, offset: Int = 0): Byte {
+        // SBC CRC-8: initial value 0x0F, polynomial 0x1D, MSB first.
         var crc = 0x0F
-        // CRC covers bytes at positions 1, 2 (header after syncword) and scale factor data
-        val crcData = byteArrayOf(frame[1], frame[2]) +
-            frame.copyOfRange(4, 4 + SUBBANDS / 2) // 4 bits × 8 subbands = 32 bits = 4 bytes
-        for (b in crcData) {
+        for (index in intArrayOf(1, 2, 4, 5, 6, 7)) {
+            val value = frame[offset + index].toInt() and 0xFF
             for (bit in 7 downTo 0) {
-                val flag = ((crc xor ((b.toInt() shr bit) and 1)) and 1) != 0
-                crc = crc shr 1
-                if (flag) crc = crc xor 0x1C
+                val feedback = ((crc ushr 7) xor (value ushr bit)) and 1
+                crc = (crc shl 1) and 0xFF
+                if (feedback != 0) crc = crc xor 0x1D
             }
         }
         return crc.toByte()
@@ -366,4 +303,25 @@ object SbcCodec {
 
         fun toByteArray(): ByteArray = data.copyOf((bitPos + 7) / 8)
     }
+}
+
+/** Compatibility facade. Live audio channels should own a separate [SbcCodecSession]. */
+object SbcCodec {
+    const val SBC_SYNCWORD = SbcCodecSession.SBC_SYNCWORD
+    const val FREQ_32K = SbcCodecSession.FREQ_32K
+    const val BLOCKS = SbcCodecSession.BLOCKS
+    const val MODE_MONO = SbcCodecSession.MODE_MONO
+    const val ALLOCATION_LOUDNESS = SbcCodecSession.ALLOCATION_LOUDNESS
+    const val SUBBANDS = SbcCodecSession.SUBBANDS
+    const val BITPOOL = SbcCodecSession.BITPOOL
+    const val SAMPLES_PER_FRAME = SbcCodecSession.SAMPLES_PER_FRAME
+    const val PCM_BYTES_PER_FRAME = SbcCodecSession.PCM_BYTES_PER_FRAME
+
+    private val session = SbcCodecSession()
+
+    fun resetEncoder() = session.resetEncoder()
+    fun resetDecoder() = session.resetDecoder()
+    fun encode(pcm: ShortArray): ByteArray? = session.encode(pcm)
+    fun decode(frame: ByteArray, offset: Int = 0): ShortArray? = session.decode(frame, offset)
+    fun frameLength(frame: ByteArray, offset: Int = 0): Int? = session.frameLength(frame, offset)
 }

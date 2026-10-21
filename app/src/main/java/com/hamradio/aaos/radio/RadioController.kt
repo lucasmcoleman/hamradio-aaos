@@ -1,11 +1,18 @@
 package com.hamradio.aaos.radio
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
 import android.util.Log
+import com.hamradio.aaos.di.RadioTransportFactory
+import com.hamradio.aaos.radio.transport.DisconnectedTransport
+import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import com.hamradio.aaos.radio.audio.RadioAudioChannel
+import com.hamradio.aaos.radio.audio.RadioAudioControl
+import com.hamradio.aaos.radio.audio.AudioFocusControl
+import com.hamradio.aaos.radio.audio.AndroidRadioAudioFocus
 import com.hamradio.aaos.radio.protocol.AprsPacket
 import com.hamradio.aaos.radio.protocol.BasicCommand
 import com.hamradio.aaos.radio.protocol.BenshiMessage
@@ -23,20 +30,10 @@ import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.transport.ConnectionState
 import com.hamradio.aaos.radio.transport.IRadioTransport
 import dagger.hilt.android.qualifiers.ApplicationContext
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -45,26 +42,50 @@ private const val TAG = "RadioController"
 private const val MAX_CHANNELS = 64
 
 @Singleton
-class RadioController @Inject constructor(
-    private val transport: IRadioTransport,
-    @ApplicationContext private val context: Context,
+class RadioController internal constructor(
+    @Volatile private var transport: IRadioTransport,
+    private val transportFactory: RadioTransportFactory,
+    private val context: Context,
+    private val scope: CoroutineScope,
+    private val focus: AudioFocusControl = AndroidRadioAudioFocus(context),
+    private val createAudio: (IRadioTransport) -> RadioAudioControl? = { target ->
+        (target as? com.hamradio.aaos.radio.transport.RfcommTransport)?.let {
+            RadioAudioChannel(context, it.deviceAddress)
+        }
+    },
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Inject constructor(transport: IRadioTransport, transportFactory: RadioTransportFactory,
+                        @ApplicationContext context: Context) :
+        this(transport, transportFactory, context, CoroutineScope(SupervisorJob() + Dispatchers.IO))
     private var collectJob: Job? = null
-    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    private var audioFocusRequest: AudioFocusRequest? = null
+    private var sessionJob: Job? = null
+    private val epoch = AtomicInteger(0)
+    private val lifecycle = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private data class PttRequest(val epoch: Int, val down: Boolean, val txToken: Int? = null)
+    private val pttRequests = Channel<PttRequest>(Channel.UNLIMITED)
+    private var txToken = 0
+    private val pttMutex = Mutex()
+    private var txTimer: Job? = null
+    private val scanLock = Any()
+    private var hasStatus = false
+    private var scanPending = false
+    private val _isPttActive = MutableStateFlow(false)
+    val isPttActive = _isPttActive.asStateFlow()
+    private data class CommandBatch(val epoch: Int, val target: IRadioTransport, val messages: List<BenshiMessage>)
+    private val commands = Channel<CommandBatch>(256)
 
     // Audio channel for PTT — separate RFCOMM connection for SBC voice
-    private var audioChannel: RadioAudioChannel? = null
+    @Volatile private var audioChannel: RadioAudioControl? = null
 
     /** Expose audio transmit state for UI. */
-    val isAudioTransmitting get() = audioChannel?.isTransmitting
+    val isAudioTransmitting: StateFlow<Boolean> get() = isPttActive
 
     // -----------------------------------------------------------------------
     // Public state
     // -----------------------------------------------------------------------
 
-    val connectionState: StateFlow<ConnectionState> = transport.connectionState
+    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
+    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
 
     private val _deviceInfo      = MutableStateFlow<DeviceInfo?>(null)
     val deviceInfo: StateFlow<DeviceInfo?> = _deviceInfo.asStateFlow()
@@ -102,7 +123,7 @@ class RadioController @Inject constructor(
     private val fragmentBuffer = java.io.ByteArrayOutputStream()
     private var currentFragmentId = -1
 
-    /** Debounce counters for settings writes — avoids flooding BLE on slider drags. */
+    /** Debounce counters for settings writes — avoids flooding the radio on slider drags. */
     private val settingsWriteGen = AtomicInteger(0)
     private val bssWriteGen = AtomicInteger(0)
     private companion object { const val SETTINGS_DEBOUNCE_MS = 500L }
@@ -116,60 +137,171 @@ class RadioController @Inject constructor(
     // Connection lifecycle
     // -----------------------------------------------------------------------
 
-    fun connect() {
+    init {
         scope.launch {
-            try {
-                transport.connect()
-                startCollecting()
-                withTimeoutOrNull(10_000L) { initializeRadio() }
-                    ?: Log.w(TAG, "Radio init sequence timed out")
-
-                // Connect audio channel for PTT (separate RFCOMM connection)
-                connectAudioChannel()
-            } catch (e: Exception) {
-                Log.e(TAG, "Connect failed", e)
+            for (action in lifecycle) {
+                try { action() }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { _errorEvent.tryEmit("Connection: ${e.message}") }
             }
         }
-
-        // Watch for reconnects — re-initialize when transport recovers from ERROR
         scope.launch {
-            var wasError = false
-            transport.connectionState.collect { state ->
-                if (state == ConnectionState.ERROR) {
-                    wasError = true
-                } else if (state == ConnectionState.CONNECTED && wasError) {
-                    wasError = false
-                    Log.i(TAG, "Transport reconnected — re-initializing radio")
-                    startCollecting()
-                    withTimeoutOrNull(10_000L) { initializeRadio() }
-                    connectAudioChannel()
+            for (batch in commands) {
+                try {
+                    for (message in batch.messages) {
+                        if (batch.epoch != epoch.get() || !batch.target.isConnected) break
+                        withTimeout(5_000L) { batch.target.send(message) }
+                    }
+                } catch (e: TimeoutCancellationException) { _errorEvent.tryEmit("Radio command timed out") }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { _errorEvent.tryEmit("Radio command: ${e.message}") }
+            }
+        }
+        scope.launch {
+            for ((generation, down, token) in pttRequests) {
+                pttMutex.withLock {
+                    if (generation != epoch.get() || (token != null && token != txToken)) return@withLock
+                    try { if (down) startPtt() else stopPtt() }
+                    catch (e: CancellationException) { throw e }
+                    catch (e: Exception) {
+                        _isPttActive.value = false
+                        abandonAudioFocus()
+                        _errorEvent.tryEmit("Microphone transmit: ${e.message}")
+                    }
                 }
             }
         }
     }
 
-    private suspend fun connectAudioChannel() {
-        val addr = (transport as? com.hamradio.aaos.radio.transport.RfcommTransport)?.deviceAddress
-            ?: return
-        try {
-            val channel = RadioAudioChannel(context, addr)
-            delay(1000) // let data connection stabilize
-            channel.connect()
-            audioChannel = channel
-            Log.i(TAG, "Audio channel connected for PTT")
-        } catch (e: Exception) {
-            Log.w(TAG, "Audio channel connect failed: ${e.message}")
+    fun connect() { lifecycle.trySend { startSession() } }
+
+    /** Ordered with connect/disconnect; no Activity or process restart is required. */
+    suspend fun switchTransport(deviceAddress: String, mockMode: Boolean) {
+        val done = CompletableDeferred<Unit>()
+        lifecycle.send {
+            try {
+                stopSession()
+                transport = transportFactory.create(deviceAddress, mockMode)
+                startSession()
+                done.complete(Unit)
+            } catch (e: Exception) { done.completeExceptionally(e) }
+        }
+        done.await()
+    }
+
+    private fun startSession() {
+        if (sessionJob?.isActive == true || transport is DisconnectedTransport) return
+        val target = transport
+        sessionJob = scope.launch {
+            while (isActive) {
+                val generation = epoch.incrementAndGet()
+                val stateJob = launch { target.connectionState.collect { _connectionState.value = it } }
+                collectJob = launch {
+                    target.inboundMessages.collect { if (generation == epoch.get()) handleInbound(it) }
+                }
+                try {
+                    withTimeout(20_000L) { target.connect() }
+                    if (target.isConnected) {
+                        coroutineScope {
+                            val init = launch { initializeRadio() }
+                            val audio = launch { connectAudioChannel(target) }
+                            target.connectionState.first { it != ConnectionState.CONNECTED }
+                            init.cancelAndJoin()
+                            audio.cancelAndJoin()
+                        }
+                    }
+                } catch (e: TimeoutCancellationException) { _errorEvent.tryEmit("Radio connection timed out") }
+                catch (e: CancellationException) { throw e }
+                catch (e: Exception) { _errorEvent.tryEmit("Radio connection: ${e.message}") }
+                finally {
+                    withContext(NonCancellable) {
+                        epoch.incrementAndGet()
+                        settingsWriteGen.incrementAndGet()
+                        bssWriteGen.incrementAndGet()
+                        pttMutex.withLock { stopPtt() }
+                        audioChannel?.disconnect()
+                        audioChannel = null
+                        target.disconnect()
+                        collectJob?.cancelAndJoin()
+                        stateJob.cancelAndJoin()
+                        resetRadioState()
+                    }
+                }
+                _connectionState.value = ConnectionState.ERROR
+                delay(5_000L)
+            }
         }
     }
 
-    fun disconnect() {
-        scope.launch {
-            collectJob?.cancelAndJoin()
-            transport.disconnect()
-            _htStatus.value = HtStatus.DISCONNECTED
-            _deviceInfo.value = null
-            _channels.value = emptyList()
+    private suspend fun connectAudioChannel(target: IRadioTransport) {
+        while (currentCoroutineContext().isActive) {
+            val channel = createAudio(target) ?: return
+            audioChannel = channel
+            try {
+                delay(1_000L)
+                withTimeout(15_000L) { channel.connect() }
+                if (channel.isConnected.value) {
+                    coroutineScope {
+                        val observer = launch {
+                            channel.isTransmitting.collect {
+                                pttMutex.withLock {
+                                    if (audioChannel === channel) {
+                                        _isPttActive.value = channel.isTransmitting.value
+                                        if (!_isPttActive.value) {
+                                            txTimer?.cancel()
+                                            txTimer = null
+                                            abandonAudioFocus()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        channel.isConnected.first { !it }
+                        observer.cancelAndJoin()
+                    }
+                }
+            } catch (e: TimeoutCancellationException) { _errorEvent.tryEmit("Radio audio connection timed out") }
+            catch (e: CancellationException) { throw e }
+            catch (e: Exception) { _errorEvent.tryEmit("Radio audio: ${e.message}") }
+            finally {
+                withContext(NonCancellable) {
+                    pttMutex.withLock { if (audioChannel === channel) stopPtt() }
+                    channel.close()
+                    if (audioChannel === channel) audioChannel = null
+                }
+            }
+            delay(5_000L)
         }
+    }
+
+    fun disconnect() { lifecycle.trySend { stopSession() } }
+
+    private suspend fun stopSession() {
+        epoch.incrementAndGet()
+        // Best-effort END_AUDIO must be sent while the audio socket is still open.
+        pttMutex.withLock { stopPtt() }
+        sessionJob?.cancel()
+        // Close pending transports before joining jobs potentially blocked in Bluetooth IO.
+        transport.disconnect()
+        audioChannel?.disconnect()
+        sessionJob?.join()
+        sessionJob = null
+        pttMutex.withLock { stopPtt() }
+        resetRadioState()
+        _connectionState.value = ConnectionState.DISCONNECTED
+    }
+
+    private fun resetRadioState() {
+        synchronized(scanLock) { hasStatus = false; scanPending = false }
+        _htStatus.value = HtStatus.DISCONNECTED
+        _deviceInfo.value = null
+        _channels.value = emptyList()
+        _settings.value = null
+        _bssSettings.value = null
+        _batteryPercent.value = -1
+        _position.value = RadioPosition()
+        fragmentBuffer.reset()
+        currentFragmentId = -1
     }
 
     // -----------------------------------------------------------------------
@@ -179,53 +311,65 @@ class RadioController @Inject constructor(
     fun setVolume(level: Int) = sendCmd(RadioCommands.setVolume(level))
 
     fun setScan(enable: Boolean) {
-        // Use DO_PROG_FUNC toggle — SET_IN_SCAN doesn't work on DB50-B
-        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN))
+        // Preserve the DB50-B toggle workaround, but never blindly toggle an unknown state.
+        synchronized(scanLock) {
+            if (_connectionState.value != ConnectionState.CONNECTED || !hasStatus) {
+                sendCmd(RadioCommands.getHtStatus())
+                return
+            }
+            if (scanPending || _htStatus.value.isScan == enable) return
+            scanPending = true
+            sendBatch(RadioCommands.doProgFunc(RadioCommands.PF_TOGGLE_CH_SCAN), RadioCommands.getHtStatus())
+        }
     }
 
-    fun setChannelA(channelId: Int) {
-        val current = _settings.value ?: return
-        val updated = current.copy(channelA = channelId)
-        applySettings(updated)
-    }
-
-    fun setChannelB(channelId: Int) {
-        val current = _settings.value ?: return
-        val updated = current.copy(channelB = channelId)
-        applySettings(updated)
-    }
+    fun setChannelA(channelId: Int) = updateSettings { it.copy(channelA = channelId) }
+    fun setChannelB(channelId: Int) = updateSettings { it.copy(channelB = channelId) }
 
     fun setHtPower(on: Boolean) = sendCmd(RadioCommands.setHtOnOff(on))
 
-    fun pttDown() {
-        requestAudioFocus()
-        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT))
-        Log.i(TAG, "PTT DOWN via DO_PROG_FUNC")
+    fun pttDown() { pttRequests.trySend(PttRequest(epoch.get(), true)) }
+    fun pttUp() { pttRequests.trySend(PttRequest(epoch.get(), false)) }
+
+    private suspend fun startPtt() {
+        if (_isPttActive.value) return
+        val channel = audioChannel
+        if (channel == null || !channel.isConnected.value) {
+            _errorEvent.tryEmit("Audio channel is not ready for microphone transmit")
+            return
+        }
+        if (!requestAudioFocus()) {
+            abandonAudioFocus()
+            _errorEvent.tryEmit("Microphone transmit could not obtain audio focus")
+            return
+        }
+        // Streaming audio starts TX; END_AUDIO ends it. Do not send the ambiguous PF_MAIN_PTT toggle.
+        if (!channel.startTransmit() || !channel.isTransmitting.value) {
+            abandonAudioFocus()
+            _errorEvent.tryEmit("Microphone capture could not start")
+            return
+        }
+        _isPttActive.value = true
+        txTimer?.cancel()
+        val generation = epoch.get()
+        val token = ++txToken
+        txTimer = scope.launch {
+            delay(120_000L)
+            pttRequests.send(PttRequest(generation, false, token))
+            _errorEvent.tryEmit("120-second app transmit limit reached; stopping capture")
+        }
     }
 
-    fun pttUp() {
-        sendCmd(RadioCommands.doProgFunc(RadioCommands.PF_MAIN_PTT))
-        abandonAudioFocus()
-        Log.i(TAG, "PTT UP via DO_PROG_FUNC")
+    private suspend fun stopPtt() {
+        ++txToken
+        txTimer?.cancel()
+        txTimer = null
+        try { audioChannel?.stopTransmit() }
+        finally { _isPttActive.value = false; abandonAudioFocus() }
     }
 
-    private fun requestAudioFocus() {
-        val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build()
-            )
-            .build()
-        audioFocusRequest = request
-        audioManager.requestAudioFocus(request)
-    }
-
-    private fun abandonAudioFocus() {
-        audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
-        audioFocusRequest = null
-    }
+    private fun requestAudioFocus(): Boolean = focus.request { pttUp() }
+    private fun abandonAudioFocus() = focus.abandon()
 
     fun saveChannel(channel: RfChannel) {
         // Optimistic UI update
@@ -235,8 +379,7 @@ class RadioController @Inject constructor(
         list.sortBy { it.channelId }
         _channels.value = list
         // Write to radio
-        sendCmd(RadioCommands.writeChannel(channel))
-        sendCmd(RadioCommands.storeSettings())
+        sendBatch(RadioCommands.writeChannel(channel), RadioCommands.storeSettings())
     }
 
     fun updateSettings(transform: (RadioSettings) -> RadioSettings) {
@@ -261,8 +404,7 @@ class RadioController @Inject constructor(
             delay(SETTINGS_DEBOUNCE_MS)
             if (bssWriteGen.get() == gen) {
                 val data = (_bssSettings.value ?: return@launch).patchRawData()
-                sendCmd(RadioCommands.writeBssSettings(data))
-                sendCmd(RadioCommands.storeSettings())
+                sendBatch(RadioCommands.writeBssSettings(data), RadioCommands.storeSettings())
             }
         }
     }
@@ -278,10 +420,8 @@ class RadioController @Inject constructor(
 
     fun refreshChannels() {
         val count = _deviceInfo.value?.channelCount ?: 16
-        scope.launch {
-            for (i in 0 until count) {
-                transport.send(RadioCommands.readChannel(i))
-            }
+        for (i in 0 until count.coerceAtMost(MAX_CHANNELS)) {
+            sendCmd(RadioCommands.readChannel(i))
         }
     }
 
@@ -295,26 +435,26 @@ class RadioController @Inject constructor(
 
         // 1. Register for all notifications first
         RadioCommands.registerAllNotifications().forEach {
-            transport.send(it)
+            sendCmd(it)
             delay(50)  // space out commands for real hardware
         }
 
         // 2. Request device info
-        transport.send(RadioCommands.getDevInfo())
+        sendCmd(RadioCommands.getDevInfo())
         delay(200)
 
         // 3. Request current status, settings, volume, battery
-        transport.send(RadioCommands.getHtStatus())
+        sendCmd(RadioCommands.getHtStatus())
         delay(50)
-        transport.send(RadioCommands.getSettings())
+        sendCmd(RadioCommands.getSettings())
         delay(50)
-        transport.send(RadioCommands.getVolume())
+        sendCmd(RadioCommands.getVolume())
         delay(50)
-        transport.send(RadioCommands.readBatteryStatus())
+        sendCmd(RadioCommands.readBatteryStatus())
         delay(50)
-        transport.send(RadioCommands.getBssSettings())
+        sendCmd(RadioCommands.getBssSettings())
         delay(50)
-        transport.send(RadioCommands.getPosition())
+        sendCmd(RadioCommands.getPosition())
 
         // 4. Wait for DevInfo reply, then load channels if not already loaded
         delay(2000)
@@ -322,7 +462,7 @@ class RadioController @Inject constructor(
             val count = _deviceInfo.value?.channelCount?.coerceAtMost(MAX_CHANNELS) ?: 16
             Log.i(TAG, "Channels not loaded from DevInfo reply, fetching $count channels")
             for (i in 0 until count) {
-                transport.send(RadioCommands.readChannel(i))
+                sendCmd(RadioCommands.readChannel(i))
                 delay(50)
             }
         }
@@ -331,13 +471,6 @@ class RadioController @Inject constructor(
     // -----------------------------------------------------------------------
     // Inbound message dispatch
     // -----------------------------------------------------------------------
-
-    private fun startCollecting() {
-        collectJob?.cancel()
-        collectJob = transport.inboundMessages
-            .onEach { msg -> handleInbound(msg) }
-            .launchIn(scope)
-    }
 
     private fun handleInbound(msg: BenshiMessage) {
         appendLog(msg)
@@ -368,6 +501,7 @@ class RadioController @Inject constructor(
             if (cmdLabel != null) {
                 _errorEvent.tryEmit("$cmdLabel rejected: $status")
             }
+            return
         }
         val payload = if (body.size > 1) body.copyOfRange(1, body.size) else ByteArray(0)
 
@@ -377,15 +511,13 @@ class RadioController @Inject constructor(
                     _deviceInfo.value = info
                     Log.i(TAG, "Device: ch=${info.channelCount} dmr=${info.supportDmr} vfo=${info.supportVfo}")
                     // Now fetch all channels
-                    scope.launch {
-                        for (i in 0 until info.channelCount.coerceAtMost(MAX_CHANNELS)) {
-                            transport.send(RadioCommands.readChannel(i))
-                        }
+                    for (i in 0 until info.channelCount.coerceAtMost(MAX_CHANNELS)) {
+                        sendCmd(RadioCommands.readChannel(i))
                     }
                 }
             }
             BasicCommand.GET_HT_STATUS -> {
-                HtStatus.decode(payload)?.let { _htStatus.value = it }
+                HtStatus.decode(payload)?.let { acceptStatus(it) }
             }
             BasicCommand.READ_SETTINGS -> {
                 Log.i(TAG, "Settings payload: ${payload.size} bytes, hex=${payload.take(24).joinToString(" ") { "%02x".format(it) }}")
@@ -421,6 +553,14 @@ class RadioController @Inject constructor(
         }
     }
 
+    private fun acceptStatus(status: HtStatus) {
+        synchronized(scanLock) {
+            _htStatus.value = status
+            hasStatus = true
+            scanPending = false
+        }
+    }
+
     private fun handleNotification(msg: BenshiMessage) {
         val body = msg.body
         if (body.isEmpty()) return
@@ -429,7 +569,7 @@ class RadioController @Inject constructor(
         Log.d(TAG, "Notification: $notif")
 
         when (notif) {
-            RadioNotification.HT_STATUS_CHANGED    -> HtStatus.decode(data)?.let { _htStatus.value = it }
+            RadioNotification.HT_STATUS_CHANGED    -> HtStatus.decode(data)?.let { acceptStatus(it) }
             RadioNotification.HT_CH_CHANGED        -> {
                 // Channel changed — re-read the channel and update status
                 RfChannel.decode(data)?.let { ch ->
@@ -486,19 +626,17 @@ class RadioController @Inject constructor(
     // Helpers
     // -----------------------------------------------------------------------
 
-    private fun sendCmd(msg: BenshiMessage) {
-        scope.launch {
-            try {
-                withTimeoutOrNull(5_000L) { transport.send(msg) }
-                    ?: Log.w(TAG, "Send timed out for command ${msg.command}")
-            } catch (e: Exception) { Log.e(TAG, "Send failed", e) }
+    private fun sendCmd(msg: BenshiMessage) = sendBatch(msg)
+
+    private fun sendBatch(vararg messages: BenshiMessage) {
+        if (!transport.isConnected) return
+        if (commands.trySend(CommandBatch(epoch.get(), transport, messages.toList())).isFailure) {
+            _errorEvent.tryEmit("Radio command queue is full; please retry")
         }
     }
 
     private fun applySettings(settings: RadioSettings) {
-        val data = settings.patchRawData()
-        sendCmd(RadioCommands.writeSettings(data))
-        sendCmd(RadioCommands.storeSettings())
+        sendBatch(RadioCommands.writeSettings(settings.patchRawData()), RadioCommands.storeSettings())
     }
 
     private fun appendLog(msg: BenshiMessage) {
