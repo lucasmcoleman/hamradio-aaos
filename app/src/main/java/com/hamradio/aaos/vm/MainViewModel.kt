@@ -17,7 +17,6 @@ import com.hamradio.aaos.radio.protocol.RfChannel
 import com.hamradio.aaos.radio.protocol.SubAudio
 import com.hamradio.aaos.radio.transport.ConnectionState
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -55,8 +54,9 @@ class MainViewModel @Inject constructor(
     val smartBeaconEnabled: StateFlow<Boolean> = _smartBeaconEnabled.asStateFlow()
     fun setSmartBeaconEnabled(enabled: Boolean) { _smartBeaconEnabled.value = enabled }
 
-    /** True when mock transport is active. */
-    val isMockMode: Boolean get() = prefs.useMockRadio
+    /** True when mock transport is active. Observable: transport can switch at runtime. */
+    private val _isMockMode = MutableStateFlow(prefs.useMockRadio)
+    val isMockMode: StateFlow<Boolean> = _isMockMode.asStateFlow()
 
     // Audio routing preferences — observable StateFlows for UI recomposition
     private val _rxAudioRoute = MutableStateFlow(prefs.rxAudioRoute)
@@ -299,27 +299,28 @@ class MainViewModel @Inject constructor(
 
     fun clearLog() = radio.clearLog()
 
-    /** Toggle between mock and real BLE transport (requires reconnect). */
-    /** Signals the Activity to recreate itself so Hilt re-injects the transport. */
-    private val _restartEvent = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
-    val restartEvent: kotlinx.coroutines.flow.Flow<Unit> = _restartEvent
-
+    /** Toggle between mock and real transport — takes effect immediately. */
     fun toggleMockMode() {
-        radio.disconnect()
         prefs.useMockRadio = !prefs.useMockRadio
-        viewModelScope.launch { _restartEvent.emit(Unit) }
+        _isMockMode.value = prefs.useMockRadio
+        radio.switchTransport()
     }
 
     fun setDeviceAddress(address: String) {
         prefs.deviceAddress = address
     }
 
-    /** Set device address and restart to reinject transport with new address. */
+    /** Connect to a new device address — swaps the transport in place. */
     fun connectToDevice(address: String) {
-        radio.disconnect()
-        prefs.deviceAddress = address
+        val normalized = address.trim().uppercase()
+        if (!android.bluetooth.BluetoothAdapter.checkBluetoothAddress(normalized)) {
+            radio.reportError("Invalid Bluetooth address: $address")
+            return
+        }
+        prefs.deviceAddress = normalized
         prefs.useMockRadio = false
-        _restartEvent.tryEmit(Unit)
+        _isMockMode.value = false
+        radio.switchTransport()
     }
 
     override fun onCleared() {
