@@ -46,6 +46,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.hamradio.aaos.radio.protocol.AprsPacket
 import com.hamradio.aaos.ui.theme.Accent
 import com.hamradio.aaos.ui.theme.AprsColor
 import com.hamradio.aaos.ui.theme.Background
@@ -53,6 +54,9 @@ import com.hamradio.aaos.ui.theme.OnSurfaceMuted
 import com.hamradio.aaos.ui.theme.Outline
 import com.hamradio.aaos.ui.theme.SurfaceCard
 import com.hamradio.aaos.vm.MainViewModel
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 @Composable
 fun AprsScreen(vm: MainViewModel) {
@@ -179,6 +183,37 @@ fun AprsScreen(vm: MainViewModel) {
             }
         }
         } // else (bss != null)
+
+        // Received packets — decoded AX.25/APRS traffic from the TNC
+        val packets by vm.aprsPackets.collectAsStateWithLifecycle()
+        val myPos by vm.position.collectAsStateWithLifecycle()
+        AprsGroup("Received Packets" + if (packets.isNotEmpty()) " (${packets.size})" else "") {
+            if (packets.isEmpty()) {
+                Text(
+                    "Nothing heard yet",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurfaceMuted,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
+            } else {
+                packets.take(MAX_PACKETS_SHOWN).forEach { p ->
+                    PacketRow(
+                        packet = p,
+                        distanceMi = if (myPos.locked && p.latitude != null && p.longitude != null) {
+                            haversineMiles(myPos.latitude, myPos.longitude, p.latitude!!, p.longitude!!)
+                        } else null,
+                    )
+                }
+                if (packets.size > MAX_PACKETS_SHOWN) {
+                    Text(
+                        "…and ${packets.size - MAX_PACKETS_SHOWN} older",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = OnSurfaceMuted,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
     }
 
     // Edit dialog
@@ -205,6 +240,69 @@ fun AprsScreen(vm: MainViewModel) {
             onDismiss = { editField = null },
         )
     }
+}
+
+private const val MAX_PACKETS_SHOWN = 20
+
+/** Great-circle distance in statute miles. */
+private fun haversineMiles(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
+    val r = 3958.8 // Earth radius, miles
+    val dLat = Math.toRadians(lat2 - lat1)
+    val dLon = Math.toRadians(lon2 - lon1)
+    val a = kotlin.math.sin(dLat / 2).let { it * it } +
+        kotlin.math.cos(Math.toRadians(lat1)) * kotlin.math.cos(Math.toRadians(lat2)) *
+        kotlin.math.sin(dLon / 2).let { it * it }
+    return 2 * r * kotlin.math.asin(kotlin.math.sqrt(a))
+}
+
+@Composable
+private fun PacketRow(packet: AprsPacket, distanceMi: Double?) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = packet.displayCallsign,
+                style = MaterialTheme.typography.labelLarge,
+                color = AprsColor,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (distanceMi != null) {
+                    Text(
+                        text = "%.1f mi".format(distanceMi),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = OnSurfaceMuted,
+                    )
+                }
+                Text(
+                    text = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(packet.receivedAtMs)),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = OnSurfaceMuted,
+                )
+            }
+        }
+        Text(
+            text = packet.info.take(90),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+            maxLines = 2,
+        )
+        if (packet.digipeaters.isNotEmpty()) {
+            Text(
+                text = "via ${packet.digipeaters.joinToString(",")}",
+                style = MaterialTheme.typography.labelSmall,
+                color = OnSurfaceMuted,
+            )
+        }
+    }
+    HorizontalDivider(color = Outline.copy(alpha = 0.3f), modifier = Modifier.padding(start = 16.dp))
 }
 
 @Composable

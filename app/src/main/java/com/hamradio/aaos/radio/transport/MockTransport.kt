@@ -353,6 +353,11 @@ class MockTransport(
                 simulateRx()
             }
 
+            // Simulate received APRS traffic (~every 30s)
+            if (tick % 15 == 0) {
+                emitMockAprsPacket()
+            }
+
             // Slowly drain battery
             if (tick % 30 == 0 && batteryPercent > 0) {
                 batteryPercent--
@@ -385,6 +390,42 @@ class MockTransport(
     private suspend fun emitNotification(notification: RadioNotification, data: ByteArray = ByteArray(0)) {
         emit(BenshiMessage(CommandGroup.BASIC, BasicCommand.EVENT_NOTIFICATION, false,
             byteArrayOf(notification.code.toByte()) + data))
+    }
+
+    // -----------------------------------------------------------------------
+    // Simulated APRS traffic — exercises the DATA_RXD → TNC → AX.25 pipeline
+    // -----------------------------------------------------------------------
+
+    private val mockStations = listOf(
+        Triple("W1AW", 9, "Mobile heading north on I-5"),
+        Triple("KI4ZZZ", 7, "HT walking downtown"),
+        Triple("N0MOCK", 5, "= test digipeater beacon"),
+    )
+
+    /** AX.25 address field: 6 chars shifted left one bit + SSID byte. */
+    private fun ax25Address(callsign: String, ssid: Int, last: Boolean): ByteArray {
+        val out = ByteArray(7)
+        val padded = callsign.padEnd(6, ' ')
+        for (i in 0 until 6) out[i] = ((padded[i].code and 0x7F) shl 1).toByte()
+        out[6] = (((ssid and 0x0F) shl 1) or 0x60 or (if (last) 1 else 0)).toByte()
+        return out
+    }
+
+    private suspend fun emitMockAprsPacket() {
+        if (RadioNotification.DATA_RXD.code !in subscribedNotifications) return
+        val (call, ssid, comment) = mockStations.random()
+        // Position near San Francisco with a little jitter
+        val info = "!37%02d.%02dN/122%02d.%02dW>%s".format(
+            (44..48).random(), (0..99).random(),
+            (23..27).random(), (0..99).random(),
+            comment,
+        )
+        val frame = ax25Address("APRS", 0, last = false) +
+            ax25Address(call, ssid, last = true) +
+            byteArrayOf(0x03, 0xF0.toByte()) +
+            info.toByteArray(Charsets.US_ASCII)
+        // Single TNC fragment: header = isFinal(0x80), fragmentId 0, no channel byte
+        emitNotification(RadioNotification.DATA_RXD, byteArrayOf(0x80.toByte()) + frame)
     }
 
     // -----------------------------------------------------------------------
