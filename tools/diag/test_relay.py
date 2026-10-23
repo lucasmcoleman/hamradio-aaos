@@ -37,6 +37,7 @@ class RelayTest(unittest.TestCase):
             s.close()
         self.proc.kill()
         self.proc.wait()
+        self.proc.stdout.close()
 
     def connect(self, port):
         s = socket.create_connection(("127.0.0.1", port), timeout=5)

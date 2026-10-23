@@ -122,6 +122,7 @@ def main():
             truck.settimeout(5)
             truck.sendall(GO)
         except OSError:
+            truck.close()
             pc.close()
             with lock:
                 state["busy"] = False
