@@ -87,14 +87,26 @@ class RfcommTransport(
                 adapter.cancelDiscovery()
                 val device = adapter.getRemoteDevice(deviceAddress)
                 val live = { continuation.isActive && owns(attempt) }
-                ensureBonded(device, live)
                 // Head units are stricter than phones: a secure SPP connect can fail where an
                 // insecure one or a direct channel works, so try each before giving up.
-                val methods = listOf<Pair<String, () -> BluetoothSocket>>(
-                    "secure" to { device.createRfcommSocketToServiceRecord(SPP_UUID) },
-                    "insecure" to { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
-                    "channel 1" to { directChannelSocket(device, 1) },
-                )
+                // GM's head unit refuses to pair non-phone devices, so an unpaired radio tries
+                // the insecure socket (no pairing needed) first, and a failed pairing only
+                // rules out the secure socket.
+                val secure = "secure" to { device.createRfcommSocketToServiceRecord(SPP_UUID) }
+                val insecure = "insecure" to { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) }
+                val direct = "channel 1" to { directChannelSocket(device, 1) }
+                val methods = if (device.bondState == BluetoothDevice.BOND_BONDED) {
+                    listOf(secure, insecure, direct)
+                } else {
+                    listOf(
+                        insecure,
+                        "paired" to {
+                            ensureBonded(device, live)
+                            device.createRfcommSocketToServiceRecord(SPP_UUID)
+                        },
+                        direct,
+                    )
+                }
                 val errors = mutableListOf<String>()
                 var socket: BluetoothSocket? = null
                 for ((label, create) in methods) {

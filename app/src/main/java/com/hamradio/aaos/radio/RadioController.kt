@@ -122,6 +122,15 @@ class RadioController internal constructor(
     private val _errorEvent = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val errorEvent: kotlinx.coroutines.flow.Flow<String> = _errorEvent
 
+    /** Why the last connect attempt failed; null once connected. Shown in the connection sheet. */
+    private val _lastConnectError = MutableStateFlow<String?>(null)
+    val lastConnectError: StateFlow<String?> = _lastConnectError.asStateFlow()
+
+    private fun reportConnectError(message: String) {
+        _lastConnectError.value = message
+        _errorEvent.tryEmit(message)
+    }
+
     /** Received APRS packets (newest first, capped at 50). */
     private val _aprsPackets = MutableStateFlow<List<AprsPacket>>(emptyList())
     val aprsPackets: StateFlow<List<AprsPacket>> = _aprsPackets.asStateFlow()
@@ -209,6 +218,7 @@ class RadioController internal constructor(
                 try {
                     withTimeout(60_000L) { target.connect() }  // room for the pairing prompt
                     if (target.isConnected) {
+                        _lastConnectError.value = null
                         coroutineScope {
                             val init = launch { initializeRadio() }
                             val audio = launch { connectAudioChannel(target) }
@@ -217,9 +227,9 @@ class RadioController internal constructor(
                             audio.cancelAndJoin()
                         }
                     }
-                } catch (e: TimeoutCancellationException) { _errorEvent.tryEmit("Radio connection timed out") }
+                } catch (e: TimeoutCancellationException) { reportConnectError("Radio connection timed out") }
                 catch (e: CancellationException) { throw e }
-                catch (e: Exception) { _errorEvent.tryEmit("Radio connection: ${e.message}") }
+                catch (e: Exception) { reportConnectError("Radio connection: ${e.message}") }
                 finally {
                     withContext(NonCancellable) {
                         epoch.incrementAndGet()

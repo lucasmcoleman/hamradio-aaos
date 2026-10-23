@@ -948,6 +948,7 @@ private fun ConnectionSheet(
 ) {
     val connState by vm.connectionState.collectAsStateWithLifecycle()
     val isMock by vm.mockMode.collectAsStateWithLifecycle()
+    val lastError by vm.lastConnectError.collectAsStateWithLifecycle()
     var addressText by remember { mutableStateOf("") }
 
     ModalBottomSheet(
@@ -997,13 +998,23 @@ private fun ConnectionSheet(
 
                 // Transport badge
                 Text(
-                    text  = if (isMock) "MOCK" else "BLE",
+                    text  = if (isMock) "MOCK" else "BT",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isMock) Accent else RxGreen,
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
                         .background(if (isMock) Accent.copy(0.15f) else RxGreen.copy(0.12f))
                         .padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+
+            // The snackbar sits behind this sheet, so repeat the failure reason here.
+            val errorText = lastError
+            if (connState != ConnectionState.CONNECTED && errorText != null) {
+                Text(
+                    text  = errorText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TxRed,
                 )
             }
 

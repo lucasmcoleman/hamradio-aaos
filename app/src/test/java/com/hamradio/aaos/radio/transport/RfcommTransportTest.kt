@@ -131,4 +131,19 @@ class RfcommTransportTest {
         assertTrue(error?.message.orEmpty().contains("pairing"))
         assertEquals(ConnectionState.ERROR, transport.connectionState.value)
     }
+
+    @Test fun unpairedRadioTriesInsecureBeforePairing() = runBlocking {
+        val insecure = mockk<BluetoothSocket>()
+        every { device.bondState } returns BluetoothDevice.BOND_NONE
+        every { device.createInsecureRfcommSocketToServiceRecord(any()) } returns insecure
+        every { insecure.connect() } just Runs
+        every { insecure.inputStream } returns input
+        every { insecure.outputStream } returns output
+        every { insecure.close() } just Runs
+        val transport = RfcommTransport(context, "00:11:22:33:44:55", scope)
+        transport.connect()
+        assertEquals(ConnectionState.CONNECTED, transport.connectionState.value)
+        verify(exactly = 0) { device.createBond() }
+        transport.disconnect()
+    }
 }

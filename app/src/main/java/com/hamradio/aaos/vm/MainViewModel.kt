@@ -38,6 +38,7 @@ class MainViewModel @Inject constructor(
 
     val connectionState: StateFlow<ConnectionState> = radio.connectionState
     val errorEvent: kotlinx.coroutines.flow.Flow<String> = radio.errorEvent
+    val lastConnectError: StateFlow<String?>     = radio.lastConnectError
     val htStatus:        StateFlow<HtStatus>        = radio.htStatus
     val settings:        StateFlow<RadioSettings?>  = radio.settings
     val bssSettings:     StateFlow<BssSettings?>    = radio.bssSettings
