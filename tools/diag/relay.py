@@ -18,6 +18,7 @@ TRUCK_PORT = 47391
 PC_PORT = 47392
 GO = b"\x01"
 IDLE_LIMIT = 35 * 60          # the app turns itself off after 30 min anyway
+WRITE_TIMEOUT = 30            # a peer that stops reading ends the pair (codex #945)
 
 
 def log(*a):
@@ -38,23 +39,27 @@ def alive(s):
         return False
 
 
-def pipe(a, b):
-    """Copy both ways until either side closes or goes idle."""
+def pipe(a, b, write_timeout=WRITE_TIMEOUT, idle_limit=IDLE_LIMIT):
+    """Copy both ways until either side closes, goes idle, or stops reading.
+    Both sockets are always closed on the way out."""
+    for s in (a, b):
+        s.settimeout(write_timeout)   # bounds sendall; recv only runs after select says ready
     sel = selectors.DefaultSelector()
     sel.register(a, selectors.EVENT_READ, b)
     sel.register(b, selectors.EVENT_READ, a)
     last = time.time()
     try:
-        while time.time() - last < IDLE_LIMIT:
+        while time.time() - last < idle_limit:
             for key, _ in sel.select(timeout=5):
                 data = key.fileobj.recv(65536)
                 if not data:
                     return
                 key.data.sendall(data)
                 last = time.time()
-    except OSError:
+    except OSError:                 # includes socket.timeout from a stalled reader
         pass
     finally:
+        sel.close()
         for s in (a, b):
             try:
                 s.close()
@@ -67,10 +72,13 @@ def main():
     ap.add_argument("--truck-net", default="192.168.0.", help="truck must connect from this prefix")
     ap.add_argument("--pc", default="192.168.0.30", help="only this address may use the PC side")
     ap.add_argument("--bind", default="0.0.0.0")
+    ap.add_argument("--truck-port", type=int, default=TRUCK_PORT)
+    ap.add_argument("--pc-port", type=int, default=PC_PORT)
+    ap.add_argument("--write-timeout", type=float, default=WRITE_TIMEOUT)
     args = ap.parse_args()
 
-    truck_srv = socket.create_server((args.bind, TRUCK_PORT))
-    pc_srv = socket.create_server((args.bind, PC_PORT))
+    truck_srv = socket.create_server((args.bind, args.truck_port))
+    pc_srv = socket.create_server((args.bind, args.pc_port))
     lock = threading.Lock()
     state = {"truck": None, "busy": False}
 
@@ -91,7 +99,7 @@ def main():
             log("truck waiting from", ip)
 
     threading.Thread(target=accept_truck, daemon=True).start()
-    log(f"relay up: truck -> :{TRUCK_PORT}, PC -> :{PC_PORT} (PC allowed: {args.pc})")
+    log(f"relay up: truck -> :{args.truck_port}, PC -> :{args.pc_port} (PC allowed: {args.pc})")
     while True:
         pc, (ip, _) = pc_srv.accept()
         if ip not in (args.pc, "127.0.0.1"):
@@ -111,6 +119,7 @@ def main():
                 continue
             state["busy"] = True
         try:
+            truck.settimeout(5)
             truck.sendall(GO)
         except OSError:
             pc.close()
@@ -121,10 +130,12 @@ def main():
         log("paired PC", ip, "with truck")
 
         def run(a=truck, b=pc):
-            pipe(a, b)
-            with lock:
-                state["busy"] = False
-            log("pair ended")
+            try:
+                pipe(a, b, write_timeout=args.write_timeout)
+            finally:
+                with lock:
+                    state["busy"] = False
+                log("pair ended")
 
         threading.Thread(target=run, daemon=True).start()
 

@@ -68,6 +68,33 @@ class DialOutSourceTest {
         assertTrue(dialCount.get() >= 2)
     }
 
+    @Test fun backsOffAfterRepeatedHangupsAndJunk() {
+        val src = DialOutSource("127.0.0.1", relay.localPort, wrap = { it }, retryMs = 500)
+        cleanup += { src.close() }
+        thread(isDaemon = true) { runCatching { src.next() } }
+        val until = System.currentTimeMillis() + 1_600
+        var junk = false
+        while (System.currentTimeMillis() < until) {
+            val s = dials.poll(100, TimeUnit.MILLISECONDS) ?: continue
+            if (junk) s.getOutputStream().write(0x7F)   // anything but GO
+            junk = !junk
+            s.close()
+        }
+        // 1.6 s with a 500 ms back-off allows at most 4 dials; a busy loop would make hundreds.
+        assertTrue("dials=${dialCount.get()}", dialCount.get() in 2..4)
+    }
+
+    @Test fun offDuringBackoffAfterHangup() {
+        val src = DialOutSource("127.0.0.1", relay.localPort, wrap = { it }, retryMs = 60_000)
+        val failed = LinkedBlockingQueue<Throwable>()
+        thread(isDaemon = true) { runCatching { src.next() }.exceptionOrNull()?.let { failed.put(it) } }
+        nextDial().close()                    // relay hangs up -> source backs off for 60 s
+        Thread.sleep(300)
+        src.close()
+        assertTrue(failed.poll(5, TimeUnit.SECONDS) is IOException)
+        assertEquals(1, dialCount.get())
+    }
+
     @Test fun closeUnblocksWaitForGo() {
         val src = source()
         val failed = LinkedBlockingQueue<Throwable>()

@@ -58,7 +58,8 @@ class DialOutSource(
                     pending = null
                     return wrap(raw)
                 }
-                runCatching { raw.close() }             // relay hung up or sent junk; dial again
+                runCatching { raw.close() }             // relay hung up or sent junk
+                pause()                                 // back off here too (codex #945)
             } catch (e: IOException) {
                 runCatching { raw.close() }
                 if (closed) break
