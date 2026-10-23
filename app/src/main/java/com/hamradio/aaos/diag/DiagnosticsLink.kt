@@ -30,19 +30,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withTimeoutOrNull
-import java.net.Inet4Address
-import java.net.NetworkInterface
-import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
 
 private const val TAG = "DiagLink"
-const val DIAG_PORT = 47390
-private const val ALLOWED_HOST = "192.168.0.30"   // Lucas's PC on the home LAN
+// The truck drops inbound connections, so the app dials out to this relay on the home LAN
+// (the chattr box). Overridable through radio_prefs "diag_relay_host" for emulator tests.
+private const val DEFAULT_RELAY_HOST = "192.168.0.33"
+const val RELAY_TRUCK_PORT = 47391
 private const val AUTO_OFF_MS = 30 * 60_000L
 
 /**
- * Diagnostics link (job #875): while switched on, a TLS listener that only completes a
- * handshake with Lucas's PC (pinned client certificate, see [DiagTls]), then waits for an
+ * Diagnostics link (job #875): while switched on, the app dials out to a relay on the home
+ * LAN (the truck drops inbound connections) and runs TLS in server mode over that socket,
+ * completing a handshake only with Lucas's PC (pinned client certificate, see [DiagTls]), then waits for an
  * Allow tap on the head unit before running the fixed [DiagCommand] set against the
  * radio saved in the app. One client at a time; turns itself off after 30 minutes.
  * Session lifecycle and limits live in [DiagServer] (codex review #941).
@@ -63,6 +63,7 @@ object DiagnosticsLink {
     private var current: DiagServer? = null
     private var pendingApproval: CompletableDeferred<Boolean>? = null
     private var fingerprint = ""
+    private var relayHost = DEFAULT_RELAY_HOST
 
     @Synchronized
     fun start(context: Context) {
@@ -71,13 +72,20 @@ object DiagnosticsLink {
         try {
             val tls = DiagTls.serverContext(app)
             fingerprint = tls.fingerprint
-            val listener = tls.context.serverSocketFactory.createServerSocket(DIAG_PORT) as SSLServerSocket
-            listener.needClientAuth = true
+            relayHost = app.getSharedPreferences("radio_prefs", Context.MODE_PRIVATE)
+                .getString("diag_relay_host", null) ?: DEFAULT_RELAY_HOST
+            val host = relayHost
+            val source = DialOutSource(host, RELAY_TRUCK_PORT, wrap = { raw ->
+                (tls.context.socketFactory.createSocket(raw, host, RELAY_TRUCK_PORT, true) as SSLSocket).apply {
+                    useClientMode = false
+                    needClientAuth = true
+                }
+            })
             lateinit var server: DiagServer
             server = DiagServer(
-                listener = listener,
-                peerFilter = { DiagCommand.isAllowedPeer(it, ALLOWED_HOST) },
-                approve = { peer -> askApproval(server, peer.hostAddress ?: "?") },
+                source = source,
+                peerFilter = { true },   // we chose the relay; the pinned client cert is the check
+                approve = { askApproval(server, "Claude's PC (via relay $host)") },
                 execute = { cmd -> run(app, cmd) },
                 banner = "hamradio diagnostics link (${Build.MODEL}). type help.",
                 autoOffMs = AUTO_OFF_MS,
@@ -137,17 +145,9 @@ object DiagnosticsLink {
             return
         }
         if (pendingApproval == null) {
-            _status.value = Status.Listening(localAddresses(), fingerprint, server.clientConnected)
+            _status.value = Status.Listening(listOf("relay $relayHost:$RELAY_TRUCK_PORT"), fingerprint, server.clientConnected)
         }
     }
-
-    private fun localAddresses(): List<String> = runCatching {
-        NetworkInterface.getNetworkInterfaces().toList()
-            .filter { it.isUp && !it.isLoopback }
-            .flatMap { it.inetAddresses.toList() }
-            .filterIsInstance<Inet4Address>()
-            .map { "${it.hostAddress}:$DIAG_PORT" }
-    }.getOrDefault(emptyList())
 
     private fun savedRadio(context: Context): String? =
         context.getSharedPreferences("radio_prefs", Context.MODE_PRIVATE).getString("device_address", null)?.uppercase()

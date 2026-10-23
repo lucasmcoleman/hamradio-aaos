@@ -34,7 +34,7 @@ class DiagServerTest {
         idleTimeoutMs: Int = 60_000,
         approveTimeoutMs: Long = 60_000,
     ) = DiagServer(
-        listener = ServerSocket(0, 50, InetAddress.getLoopbackAddress()),
+        source = ServerSocketSource(ServerSocket(0, 50, InetAddress.getLoopbackAddress())),
         peerFilter = { true }, approve = approve, execute = execute, banner = "hello",
         autoOffMs = autoOffMs, idleTimeoutMs = idleTimeoutMs, approveTimeoutMs = approveTimeoutMs,
         handshake = handshake,

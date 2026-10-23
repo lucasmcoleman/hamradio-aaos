@@ -17,7 +17,6 @@ import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetAddress
-import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketTimeoutException
 
@@ -31,11 +30,11 @@ import java.net.SocketTimeoutException
  * - One client at a time; any other connection is closed at once, unread and unwritten.
  * - Lines are capped at [maxLine] bytes; idle clients are dropped after [idleTimeoutMs].
  * - Commands run one at a time.
- * - [stop] (switch-off, `off`, or the [autoOffMs] expiry) closes the listener and the
+ * - [stop] (switch-off, `off`, or the [autoOffMs] expiry) closes the [source] and the
  *   connected client, and no command is dispatched after it.
  */
 class DiagServer(
-    private val listener: ServerSocket,
+    private val source: SocketSource,
     private val peerFilter: (InetAddress) -> Boolean,
     private val approve: suspend (InetAddress) -> Boolean,
     private val execute: suspend (DiagCommand) -> String,
@@ -55,7 +54,7 @@ class DiagServer(
     @Volatile var active = true
         private set
 
-    val localPort: Int get() = listener.localPort
+    val localPort: Int get() = (source as? ServerSocketSource)?.localPort ?: -1
     val clientConnected: Boolean get() = client != null
 
     fun start(): DiagServer {
@@ -72,7 +71,7 @@ class DiagServer(
             toClose = client
             client = null
         }
-        runCatching { listener.close() }
+        source.close()
         runCatching { toClose?.close() }
         scope.cancel()
         onChange(this)
@@ -80,7 +79,12 @@ class DiagServer(
 
     private suspend fun acceptLoop() {
         while (active) {
-            val sock = try { listener.accept() } catch (_: IOException) { return }
+            if (source.waitsForSlot) {
+                // Dial-out makes one connection at a time: don't dial again while one is live.
+                while (active && client != null) delay(200)
+                if (!active) return
+            }
+            val sock = try { source.next() } catch (_: IOException) { return }
             if (!peerFilter(sock.inetAddress)) { runCatching { sock.close() }; continue }
             val accepted = synchronized(lock) {
                 if (!active || client != null) false else { client = sock; true }

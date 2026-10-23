@@ -76,7 +76,7 @@ class DiagTlsServerTest {
         val listener = ctx.serverSocketFactory.createServerSocket(0, 50, InetAddress.getLoopbackAddress()) as SSLServerSocket
         listener.needClientAuth = true
         return DiagServer(
-            listener = listener,
+            source = ServerSocketSource(listener),
             peerFilter = { true },
             approve = { approvals.incrementAndGet(); asked.countDown(); kotlinx.coroutines.awaitCancellation() },
             execute = { "ok" },
