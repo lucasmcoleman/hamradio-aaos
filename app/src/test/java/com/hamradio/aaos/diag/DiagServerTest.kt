@@ -55,8 +55,8 @@ class DiagServerTest {
                 lines += l
             }
         }
-        /** True once the server has closed the connection. */
-        fun closedByServer(): Boolean = runCatching { reader.readLine() == null }.getOrDefault(true)
+        /** True once the server has closed the connection (EOF or reset); a read timeout fails. */
+        fun closedByServer(): Boolean = DiagTestSockets.closedByServer { reader.readLine() == null }
     }
 
     private fun waitFor(cond: () -> Boolean) {
@@ -153,13 +153,12 @@ class DiagServerTest {
         waitFor { !s.active }
     }
 
-    @Test fun secondClientIsBusyEvenWhileFirstAwaitsApproval() {
+    @Test fun secondClientIsClosedEvenWhileFirstAwaitsApproval() {
         val asked = CountDownLatch(1)
         val s = server(approve = { asked.countDown(); awaitCancellation() })
         Client(s.localPort)
         assertTrue(asked.await(5, TimeUnit.SECONDS))
         val second = Client(s.localPort)
-        assertEquals("busy", second.reader.readLine())
         assertTrue(second.closedByServer())
     }
 

@@ -28,7 +28,7 @@ import java.net.SocketTimeoutException
  * - [handshake] authenticates the peer (TLS client certificate) before anything else.
  * - Every connection must then be approved on the head unit ([approve]); nothing is
  *   sent before that, and the single client slot stays held while the prompt is up.
- * - One client at a time; a second connection is told "busy" and closed.
+ * - One client at a time; any other connection is closed at once, unread and unwritten.
  * - Lines are capped at [maxLine] bytes; idle clients are dropped after [idleTimeoutMs].
  * - Commands run one at a time.
  * - [stop] (switch-off, `off`, or the [autoOffMs] expiry) closes the listener and the
@@ -86,7 +86,9 @@ class DiagServer(
                 if (!active || client != null) false else { client = sock; true }
             }
             if (!accepted) {
-                runCatching { sock.getOutputStream().write("busy\n".toByteArray()); sock.close() }
+                // Close without writing: a write on an SSLSocket would start a handshake here,
+                // and a silent peer could stall the accept loop (codex recheck #942).
+                runCatching { sock.close() }
                 continue
             }
             onChange(this)
