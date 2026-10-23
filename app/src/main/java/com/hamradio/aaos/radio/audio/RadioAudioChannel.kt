@@ -10,6 +10,7 @@ import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Log
+import com.hamradio.aaos.radio.transport.describe
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -88,17 +89,41 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
                     val adapter = manager?.adapter ?: return@launch
                     adapter.cancelDiscovery()
                     val device = adapter.getRemoteDevice(deviceAddress)
-                    val sock = try {
-                        device.createRfcommSocketToServiceRecord(GENERIC_AUDIO_UUID)
-                    } catch (_: IOException) {
-                        device.createRfcommSocketToServiceRecord(SPP_UUID)
+                    // Fall back on connect failures too, not just socket creation (codex #940).
+                    val attempts = listOf<Pair<String, () -> BluetoothSocket>>(
+                        "audio" to { device.createRfcommSocketToServiceRecord(GENERIC_AUDIO_UUID) },
+                        "audio insecure" to { device.createInsecureRfcommSocketToServiceRecord(GENERIC_AUDIO_UUID) },
+                        "spp" to { device.createRfcommSocketToServiceRecord(SPP_UUID) },
+                    )
+                    val errors = mutableListOf<String>()
+                    var sock: BluetoothSocket? = null
+                    for ((label, open) in attempts) {
+                        val next = try {
+                            open()
+                        } catch (e: IOException) {
+                            errors += "$label: ${describe(e)}"
+                            continue
+                        }
+                        candidate = next
+                        synchronized(stateLock) {
+                            if (generation != attempt || !continuation.isActive) return@launch
+                            pendingSocket = next
+                        }
+                        try {
+                            next.connect()
+                            sock = next
+                            break
+                        } catch (e: IOException) {
+                            errors += "$label: ${describe(e)}"
+                            close(next)
+                            candidate = null
+                            synchronized(stateLock) {
+                                if (generation != attempt || !continuation.isActive) return@launch
+                                pendingSocket = null
+                            }
+                        }
                     }
-                    candidate = sock
-                    synchronized(stateLock) {
-                        if (generation != attempt || !continuation.isActive) return@launch
-                        pendingSocket = sock
-                    }
-                    sock.connect()
+                    if (sock == null) throw IOException("audio link failed (${errors.joinToString("; ")})")
                     val connected = Session(sock, sock.inputStream, sock.outputStream)
                     synchronized(stateLock) {
                         if (generation != attempt || !continuation.isActive) return@launch
