@@ -1,5 +1,6 @@
 package com.hamradio.aaos.radio.transport
 
+import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
@@ -11,6 +12,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.hamradio.aaos.radio.protocol.BenshiMessage
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -23,10 +25,13 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.util.UUID
 
 private const val TAG = "BleTransport"
+private const val WRITE_ACK_TIMEOUT_MS = 2_000L
 
 // Benshi BLE GATT UUIDs (same across all Benshi-family radios)
 private val SERVICE_UUID  = UUID.fromString("00001100-d102-11e1-9b23-00025b00a5a5")
@@ -35,23 +40,39 @@ private val INDICATE_UUID = UUID.fromString("00001102-d102-11e1-9b23-00025b00a5a
 private val CCCD_UUID     = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
 /**
- * BLE transport implementation using Android's BluetoothGatt API.
+ * BLE GATT transport for Benshi messages (raw, no GAIA framing).
  *
- * Connection flow: discover services -> negotiate MTU -> enable indications
- * (CCCD write confirmed) -> CONNECTED. Incoming data is buffered for
- * reassembly in case BLE fragments large payloads across multiple indications.
+ * Control only: the radio sends voice over classic Bluetooth, so there is no audio
+ * channel over BLE. Used when a head unit refuses classic connections to non-phones.
+ *
+ * Connection flow: connect -> discover services -> negotiate MTU -> enable indications
+ * (CCCD write confirmed) -> CONNECTED. [connect] suspends until that finishes or fails.
+ * Each attempt owns a [Session]; callbacks from a stale session are ignored.
  */
+@SuppressLint("MissingPermission")
 class BleTransport(
     private val context: Context,
-    private val deviceAddress: String,
+    val deviceAddress: String,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
 ) : IRadioTransport {
 
-    private var gatt: BluetoothGatt? = null
-    private var writeCharacteristic: BluetoothGattCharacteristic? = null
-    private val sendChannel = Channel<ByteArray>(Channel.BUFFERED)
-    private var sendJob: Job? = null
-    private val receiveBuffer = ByteArrayOutputStream()
+    private inner class Session {
+        var gatt: BluetoothGatt? = null
+        var writeCharacteristic: BluetoothGattCharacteristic? = null
+        val ready = CompletableDeferred<Unit>()
+        val sendChannel = Channel<ByteArray>(64)
+        val writeAcks = Channel<Int>(Channel.CONFLATED)
+        var sendJob: Job? = null
+        val receiveBuffer = ByteArrayOutputStream()
+
+        fun fail(reason: String) {
+            Log.e(TAG, reason)
+            if (!ready.isCompleted) ready.completeExceptionally(IOException(reason))
+            else if (current === this) _connectionState.value = ConnectionState.ERROR
+        }
+    }
+
+    @Volatile private var current: Session? = null
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     override val connectionState = _connectionState.asStateFlow()
@@ -62,154 +83,173 @@ class BleTransport(
     override val isConnected: Boolean
         get() = _connectionState.value == ConnectionState.CONNECTED
 
-    private val gattCallback = object : BluetoothGattCallback() {
+    private fun callbackFor(session: Session) = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            if (current !== session) return
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
-                    Log.d(TAG, "GATT connected, discovering services…")
-                    _connectionState.value = ConnectionState.CONNECTING
+                    Log.d(TAG, "GATT connected, discovering services")
                     gatt.discoverServices()
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
-                    Log.d(TAG, "GATT disconnected (status=$status)")
-                    _connectionState.value = ConnectionState.DISCONNECTED
-                    writeCharacteristic = null
+                    session.writeCharacteristic = null
+                    session.fail("BLE link dropped (status $status)")
                 }
             }
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.e(TAG, "Service discovery failed: $status")
-                _connectionState.value = ConnectionState.ERROR
-                return
-            }
+            if (current !== session) return
+            if (status != BluetoothGatt.GATT_SUCCESS) return session.fail("BLE service discovery failed (status $status)")
             val service = gatt.getService(SERVICE_UUID)
-            if (service == null) {
-                Log.e(TAG, "Benshi service not found — is this a Benshi radio?")
-                _connectionState.value = ConnectionState.ERROR
-                return
-            }
-            writeCharacteristic = service.getCharacteristic(WRITE_UUID)
-            val indicateChar = service.getCharacteristic(INDICATE_UUID)
-            if (indicateChar == null || writeCharacteristic == null) {
-                Log.e(TAG, "Required characteristics missing")
-                _connectionState.value = ConnectionState.ERROR
-                return
+                ?: return session.fail("radio has no Benshi BLE service")
+            session.writeCharacteristic = service.getCharacteristic(WRITE_UUID)
+            if (service.getCharacteristic(INDICATE_UUID) == null || session.writeCharacteristic == null) {
+                return session.fail("radio BLE characteristics missing")
             }
             // Negotiate larger MTU before enabling indications
-            gatt.requestMtu(512)
+            if (!gatt.requestMtu(512)) enableIndications(gatt, session)
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            if (current !== session) return
             Log.d(TAG, "MTU negotiated: $mtu (status=$status)")
-            // Enable indications now that MTU is set
-            val service = gatt.getService(SERVICE_UUID) ?: return
-            val indicateChar = service.getCharacteristic(INDICATE_UUID) ?: return
-            gatt.setCharacteristicNotification(indicateChar, true)
-            val descriptor = indicateChar.getDescriptor(CCCD_UUID)
-            if (descriptor != null) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
-                } else {
-                    @Suppress("DEPRECATION")
-                    descriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
-                    @Suppress("DEPRECATION")
-                    gatt.writeDescriptor(descriptor)
+            enableIndications(gatt, session)
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (current !== session) return
+            if (status != BluetoothGatt.GATT_SUCCESS) return session.fail("BLE indication setup failed (status $status)")
+            Log.i(TAG, "BLE connected to $deviceAddress")
+            session.sendJob = scope.launch { sendWorker(session) }
+            _connectionState.value = ConnectionState.CONNECTED
+            session.ready.complete(Unit)
+        }
+
+        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (current === session) session.writeAcks.trySend(status)
+        }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
+            if (current !== session || characteristic.uuid != INDICATE_UUID) return
+            val buffer = session.receiveBuffer
+            synchronized(buffer) {
+                buffer.write(value)
+                val buf = buffer.toByteArray()
+                if (buf.size >= 4) {
+                    BenshiMessage.decode(buf)?.let { msg ->
+                        _inbound.tryEmit(msg)
+                        buffer.reset()
+                        return
+                    }
                 }
-            }
-        }
-
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int,
-        ) {
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                Log.d(TAG, "CCCD write success — radio connected")
-                _connectionState.value = ConnectionState.CONNECTED
-                sendJob = scope.launch { sendWorker() }
-            } else {
-                Log.e(TAG, "CCCD write failed: $status")
-                _connectionState.value = ConnectionState.ERROR
-            }
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-        ) {
-            if (characteristic.uuid == INDICATE_UUID) {
-                synchronized(receiveBuffer) {
-                    receiveBuffer.write(value)
-                    val buf = receiveBuffer.toByteArray()
-                    if (buf.size >= 4) {
-                        BenshiMessage.decode(buf)?.let { msg ->
-                            scope.launch { _inbound.emit(msg) }
-                            receiveBuffer.reset()
-                            return
-                        }
-                    }
-                    // Prevent unbounded growth from unparseable data
-                    if (receiveBuffer.size() > 1024) {
-                        Log.w(TAG, "Receive buffer overflow (${receiveBuffer.size()} bytes), clearing")
-                        receiveBuffer.reset()
-                    }
+                // Prevent unbounded growth from unparseable data
+                if (buffer.size() > 1024) {
+                    Log.w(TAG, "Receive buffer overflow (${buffer.size()} bytes), clearing")
+                    buffer.reset()
                 }
             }
         }
 
         // Android < 13 callback
         @Suppress("OVERRIDE_DEPRECATION")
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-        ) {
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             @Suppress("DEPRECATION")
             onCharacteristicChanged(gatt, characteristic, characteristic.value ?: return)
         }
     }
 
-    override suspend fun connect() = withContext(Dispatchers.IO) {
-        _connectionState.value = ConnectionState.SCANNING
-        val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
-        val device = adapter.getRemoteDevice(deviceAddress)
-        Log.d(TAG, "Connecting to $deviceAddress…")
-        gatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+    private fun enableIndications(gatt: BluetoothGatt, session: Session) {
+        val indicateChar = gatt.getService(SERVICE_UUID)?.getCharacteristic(INDICATE_UUID)
+            ?: return session.fail("radio BLE characteristics missing")
+        gatt.setCharacteristicNotification(indicateChar, true)
+        val descriptor = indicateChar.getDescriptor(CCCD_UUID)
+            ?: return session.fail("radio BLE indication descriptor missing")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE)
+        } else {
+            @Suppress("DEPRECATION")
+            descriptor.value = BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            @Suppress("DEPRECATION")
+            gatt.writeDescriptor(descriptor)
+        }
+    }
+
+    override suspend fun connect() {
+        val session = Session()
+        val previous = current
+        current = session
+        previous?.let { close(it) }
+        _connectionState.value = ConnectionState.CONNECTING
+        try {
+            withContext(Dispatchers.IO) {
+                val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+                val adapter = manager?.adapter ?: throw IOException("BluetoothAdapter not available")
+                val device = adapter.getRemoteDevice(deviceAddress)
+                Log.d(TAG, "Connecting to $deviceAddress over BLE")
+                session.gatt = device.connectGatt(context, false, callbackFor(session), BluetoothDevice.TRANSPORT_LE)
+                    ?: throw IOException("BLE connect could not start")
+            }
+            session.ready.await()
+        } catch (e: Exception) {
+            if (current === session) {
+                current = null
+                _connectionState.value = if (e is IOException) ConnectionState.ERROR else ConnectionState.DISCONNECTED
+            }
+            close(session)
+            throw e
+        }
     }
 
     override suspend fun send(message: BenshiMessage) {
-        sendChannel.send(message.encode())
+        val session = current?.takeIf { isConnected } ?: return
+        session.sendChannel.trySend(message.encode())
     }
 
-    override suspend fun disconnect() = withContext(Dispatchers.IO) {
-        sendJob?.cancel()
-        sendChannel.close()
-        gatt?.disconnect()
-        gatt?.close()
-        gatt = null
-        writeCharacteristic = null
-        synchronized(receiveBuffer) { receiveBuffer.reset() }
+    override suspend fun disconnect() {
+        val session = current
+        current = null
+        session?.let { close(it) }
         _connectionState.value = ConnectionState.DISCONNECTED
     }
 
-    private suspend fun sendWorker() = withContext(Dispatchers.IO) {
-        for (bytes in sendChannel) {
-            val char = writeCharacteristic
-            val g = gatt
+    private fun close(session: Session) {
+        session.sendJob?.cancel()
+        session.sendChannel.close()
+        try {
+            session.gatt?.disconnect()
+            session.gatt?.close()
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Missing Bluetooth permission on close", e)
+        }
+        session.gatt = null
+        session.writeCharacteristic = null
+        if (!session.ready.isCompleted) session.ready.completeExceptionally(IOException("BLE connect cancelled"))
+    }
+
+    /** GATT allows one outstanding write, so wait for each write's callback before the next. */
+    private suspend fun sendWorker(session: Session) {
+        for (bytes in session.sendChannel) {
+            val char = session.writeCharacteristic
+            val g = session.gatt
             if (char == null || g == null) {
                 Log.w(TAG, "GATT or characteristic null, dropping message")
-            } else {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
-                } else {
-                    @Suppress("DEPRECATION")
-                    char.value = bytes
-                    @Suppress("DEPRECATION")
-                    g.writeCharacteristic(char)
-                }
+                continue
             }
+            val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
+            } else {
+                @Suppress("DEPRECATION")
+                char.value = bytes
+                @Suppress("DEPRECATION")
+                g.writeCharacteristic(char)
+            }
+            if (!started) {
+                Log.w(TAG, "BLE write could not start (${bytes.toHexString()})")
+                continue
+            }
+            val status = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) { session.writeAcks.receive() }
+            if (status != BluetoothGatt.GATT_SUCCESS) Log.w(TAG, "BLE write failed or timed out (status $status)")
         }
     }
 }

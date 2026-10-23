@@ -112,7 +112,7 @@ class RfcommTransport(
                 for ((label, create) in methods) {
                     if (!live()) break
                     val candidate = try { create() } catch (e: Exception) {
-                        errors += "$label: ${e.message}"
+                        errors += "$label: ${describe(e)}"
                         continue
                     }
                     val attached = synchronized(ownership) {
@@ -131,7 +131,7 @@ class RfcommTransport(
                         Log.i(TAG, "RFCOMM $label connect succeeded")
                         break
                     } catch (e: IOException) {
-                        errors += "$label: ${e.message}"
+                        errors += "$label: ${describe(e)}"
                         Log.w(TAG, "RFCOMM $label connect failed: ${e.message}")
                         synchronized(ownership) { if (attempt.socket === candidate) attempt.socket = null }
                         try { candidate.close() } catch (_: IOException) {}
@@ -329,4 +329,10 @@ class RfcommTransport(
         // Closing BluetoothSocket also closes its streams and aborts connect/read/write.
         try { resources.second?.close() } catch (_: IOException) {}
     }
+}
+
+/** Readable failure text: unwraps reflection wrappers and names exceptions that carry no message. */
+internal fun describe(e: Throwable): String {
+    val cause = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+    return cause.message?.takeIf { it.isNotBlank() } ?: cause.javaClass.simpleName
 }

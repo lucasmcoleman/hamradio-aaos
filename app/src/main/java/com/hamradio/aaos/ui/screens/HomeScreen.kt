@@ -949,6 +949,7 @@ private fun ConnectionSheet(
     val connState by vm.connectionState.collectAsStateWithLifecycle()
     val isMock by vm.mockMode.collectAsStateWithLifecycle()
     val lastError by vm.lastConnectError.collectAsStateWithLifecycle()
+    val controlOnly by vm.controlOnly.collectAsStateWithLifecycle()
     var addressText by remember { mutableStateOf("") }
 
     ModalBottomSheet(
@@ -998,13 +999,25 @@ private fun ConnectionSheet(
 
                 // Transport badge
                 Text(
-                    text  = if (isMock) "MOCK" else "BT",
+                    text  = when {
+                        isMock      -> "MOCK"
+                        controlOnly -> "BLE"
+                        else        -> "BT"
+                    },
                     style = MaterialTheme.typography.labelMedium,
                     color = if (isMock) Accent else RxGreen,
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
                         .background(if (isMock) Accent.copy(0.15f) else RxGreen.copy(0.12f))
                         .padding(horizontal = 8.dp, vertical = 3.dp),
+                )
+            }
+
+            if (connState == ConnectionState.CONNECTED && controlOnly) {
+                Text(
+                    text  = "Connected over BLE: control only. Radio audio and PTT from this screen need classic Bluetooth, which this car blocks. Use the radio's own speaker, mic and PTT.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurfaceMuted,
                 )
             }
 

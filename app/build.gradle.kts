@@ -25,8 +25,8 @@ android {
         applicationId = "com.kk4fvc.benshiradiocontrol"
         minSdk = 29
         targetSdk = 35
-        versionCode = 33
-        versionName = "1.2.5"
+        versionCode = 34
+        versionName = "1.3.0"
     }
 
     signingConfigs {

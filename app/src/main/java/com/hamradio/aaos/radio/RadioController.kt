@@ -3,6 +3,7 @@ package com.hamradio.aaos.radio
 import android.content.Context
 import android.util.Log
 import com.hamradio.aaos.di.RadioTransportFactory
+import com.hamradio.aaos.radio.transport.BleTransport
 import com.hamradio.aaos.radio.transport.DisconnectedTransport
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -12,6 +13,7 @@ import kotlinx.coroutines.sync.withLock
 import com.hamradio.aaos.radio.audio.RadioAudioChannel
 import com.hamradio.aaos.radio.audio.RadioAudioControl
 import com.hamradio.aaos.radio.audio.MockRadioAudioChannel
+import com.hamradio.aaos.radio.transport.FailoverTransport
 import com.hamradio.aaos.radio.transport.MockTransport
 import com.hamradio.aaos.radio.transport.RfcommTransport
 import com.hamradio.aaos.radio.audio.AudioFocusControl
@@ -49,6 +51,7 @@ internal fun selectRadioAudio(context: Context, target: IRadioTransport): RadioA
     when (target) {
         is MockTransport -> MockRadioAudioChannel(context)
         is RfcommTransport -> RadioAudioChannel(context, target.deviceAddress)
+        is FailoverTransport -> selectRadioAudio(context, target.activeTransport)
         else -> null
     }
 
@@ -125,6 +128,10 @@ class RadioController internal constructor(
     /** Why the last connect attempt failed; null once connected. Shown in the connection sheet. */
     private val _lastConnectError = MutableStateFlow<String?>(null)
     val lastConnectError: StateFlow<String?> = _lastConnectError.asStateFlow()
+
+    /** True while the link is BLE (control only: no audio channel, so no app PTT). */
+    private val _controlOnly = MutableStateFlow(false)
+    val controlOnly: StateFlow<Boolean> = _controlOnly.asStateFlow()
 
     private fun reportConnectError(message: String) {
         _lastConnectError.value = message
@@ -219,6 +226,7 @@ class RadioController internal constructor(
                     withTimeout(60_000L) { target.connect() }  // room for the pairing prompt
                     if (target.isConnected) {
                         _lastConnectError.value = null
+                        _controlOnly.value = target is FailoverTransport && target.activeTransport is BleTransport
                         coroutineScope {
                             val init = launch { initializeRadio() }
                             val audio = launch { connectAudioChannel(target) }
@@ -312,6 +320,7 @@ class RadioController internal constructor(
         synchronized(scanLock) { hasStatus = false; scanPending = false }
         _htStatus.value = HtStatus.DISCONNECTED
         _deviceInfo.value = null
+        _controlOnly.value = false
         _channels.value = emptyList()
         _settings.value = null
         _bssSettings.value = null
@@ -352,7 +361,10 @@ class RadioController internal constructor(
         if (_isPttActive.value) return
         val channel = audioChannel
         if (channel == null || !channel.isConnected.value) {
-            _errorEvent.tryEmit("Audio channel is not ready for microphone transmit")
+            _errorEvent.tryEmit(
+                if (_controlOnly.value) "PTT needs classic Bluetooth. Over BLE, use the radio's own PTT and mic."
+                else "Audio channel is not ready for microphone transmit"
+            )
             return
         }
         if (!requestAudioFocus()) {
