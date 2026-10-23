@@ -18,100 +18,127 @@ import android.os.ParcelUuid
 import android.os.Process
 import android.util.Log
 import com.hamradio.aaos.radio.transport.describe
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.PrintWriter
 import java.net.Inet4Address
 import java.net.NetworkInterface
-import java.net.ServerSocket
-import java.net.Socket
-import java.util.concurrent.atomic.AtomicReference
+import javax.net.ssl.SSLServerSocket
+import javax.net.ssl.SSLSocket
 
 private const val TAG = "DiagLink"
 const val DIAG_PORT = 47390
 private const val ALLOWED_HOST = "192.168.0.30"   // Lucas's PC on the home LAN
 private const val AUTO_OFF_MS = 30 * 60_000L
-private const val END = "<<END>>"
 
 /**
- * Diagnostics link (job #875): while switched on, accepts one TCP client at a time from
- * Lucas's PC (or loopback via adb forward) and runs the fixed [DiagCommand] set against
- * the Bluetooth stack from inside the app. Turns itself off after 30 minutes.
+ * Diagnostics link (job #875): while switched on, a TLS listener that only completes a
+ * handshake with Lucas's PC (pinned client certificate, see [DiagTls]), then waits for an
+ * Allow tap on the head unit before running the fixed [DiagCommand] set against the
+ * radio saved in the app. One client at a time; turns itself off after 30 minutes.
+ * Session lifecycle and limits live in [DiagServer] (codex review #941).
  */
 @SuppressLint("MissingPermission")
 object DiagnosticsLink {
 
     sealed class Status {
         object Off : Status()
-        data class Listening(val addresses: List<String>, val clients: Int) : Status()
+        data class Listening(val addresses: List<String>, val fingerprint: String, val clientConnected: Boolean) : Status()
+        data class AwaitingApproval(val peer: String, val fingerprint: String) : Status()
         data class Failed(val reason: String) : Status()
     }
 
     private val _status = MutableStateFlow<Status>(Status.Off)
     val status: StateFlow<Status> = _status.asStateFlow()
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val server = AtomicReference<ServerSocket?>(null)
-    private var job: Job? = null
-    private var clients = 0
+    private var current: DiagServer? = null
+    private var pendingApproval: CompletableDeferred<Boolean>? = null
+    private var fingerprint = ""
 
     @Synchronized
     fun start(context: Context) {
-        if (job?.isActive == true) return
+        if (current?.active == true) return
         val app = context.applicationContext
-        job = scope.launch {
-            val socket = try {
-                ServerSocket(DIAG_PORT)
-            } catch (e: Exception) {
-                _status.value = Status.Failed("could not listen on $DIAG_PORT: ${describe(e)}")
-                return@launch
-            }
-            server.set(socket)
-            clients = 0
-            publish()
-            val timer = launch { delay(AUTO_OFF_MS); stop() }
-            try {
-                while (true) {
-                    val client = socket.accept()
-                    if (!DiagCommand.isAllowedPeer(client.inetAddress, ALLOWED_HOST)) {
-                        Log.w(TAG, "refused ${client.inetAddress.hostAddress}")
-                        client.close()
-                        continue
-                    }
-                    launch { serve(app, client) }
-                }
-            } catch (_: Exception) {
-                // closed by stop()
-            } finally {
-                timer.cancel()
-                server.getAndSet(null)?.close()
-                if (_status.value !is Status.Failed) _status.value = Status.Off
-            }
+        try {
+            val tls = DiagTls.serverContext(app)
+            fingerprint = tls.fingerprint
+            val listener = tls.context.serverSocketFactory.createServerSocket(DIAG_PORT) as SSLServerSocket
+            listener.needClientAuth = true
+            lateinit var server: DiagServer
+            server = DiagServer(
+                listener = listener,
+                peerFilter = { DiagCommand.isAllowedPeer(it, ALLOWED_HOST) },
+                approve = { peer -> askApproval(server, peer.hostAddress ?: "?") },
+                execute = { cmd -> run(app, cmd) },
+                banner = "hamradio diagnostics link (${Build.MODEL}). type help.",
+                autoOffMs = AUTO_OFF_MS,
+                handshake = { (it as SSLSocket).startHandshake() },
+                onChange = { s -> publish(s) },
+            )
+            current = server.start()
+            publish(server)
+        } catch (e: Exception) {
+            Log.w(TAG, "start failed", e)
+            _status.value = Status.Failed("could not start: ${describe(e)}")
         }
     }
 
     @Synchronized
     fun stop() {
-        server.getAndSet(null)?.let { runCatching { it.close() } }
-        job?.cancel()
-        job = null
+        current?.stop()
+        current = null
+        pendingApproval?.complete(false)
+        pendingApproval = null
         _status.value = Status.Off
     }
 
-    private fun publish() {
-        if (server.get() != null) _status.value = Status.Listening(localAddresses(), clients)
+    /** The head unit's answer to the Allow prompt for the connection now waiting. */
+    @Synchronized
+    fun answer(allow: Boolean) {
+        pendingApproval?.complete(allow)
+        pendingApproval = null
+    }
+
+    private suspend fun askApproval(server: DiagServer, peer: String): Boolean {
+        val decision = CompletableDeferred<Boolean>()
+        synchronized(this) {
+            if (current !== server || !server.active) return false
+            pendingApproval?.complete(false)
+            pendingApproval = decision
+            _status.value = Status.AwaitingApproval(peer, fingerprint)
+        }
+        return try {
+            decision.await()
+        } finally {
+            synchronized(this) {
+                if (pendingApproval === decision) pendingApproval = null
+                if (current === server) publish(server)
+            }
+        }
+    }
+
+    @Synchronized
+    private fun publish(server: DiagServer) {
+        if (current !== server) return   // an old session never changes what the screen shows
+        if (!server.active) {
+            current = null
+            pendingApproval?.complete(false)
+            pendingApproval = null
+            _status.value = Status.Off
+            return
+        }
+        if (pendingApproval == null) {
+            _status.value = Status.Listening(localAddresses(), fingerprint, server.clientConnected)
+        }
     }
 
     private fun localAddresses(): List<String> = runCatching {
@@ -122,32 +149,8 @@ object DiagnosticsLink {
             .map { "${it.hostAddress}:$DIAG_PORT" }
     }.getOrDefault(emptyList())
 
-    private suspend fun serve(context: Context, client: Socket) {
-        synchronized(this) { clients++ }
-        publish()
-        try {
-            client.use { sock ->
-                val reader = BufferedReader(InputStreamReader(sock.getInputStream()))
-                val out = PrintWriter(sock.getOutputStream(), true)
-                out.println("hamradio diagnostics link (${Build.MODEL}). type help.")
-                out.println(END)
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    val cmd = DiagCommand.parse(line)
-                    val text = runCatching { run(context, cmd) }
-                        .getOrElse { "error: ${describe(it)}" }
-                    out.println(text)
-                    out.println(END)
-                    if (cmd is DiagCommand.Off) { stop(); break }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "client ended: ${describe(e)}")
-        } finally {
-            synchronized(this) { clients-- }
-            publish()
-        }
-    }
+    private fun savedRadio(context: Context): String? =
+        context.getSharedPreferences("radio_prefs", Context.MODE_PRIVATE).getString("device_address", null)?.uppercase()
 
     private suspend fun run(context: Context, cmd: DiagCommand): String {
         val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
@@ -160,6 +163,7 @@ object DiagnosticsLink {
             is DiagCommand.Log -> appLog(cmd.lines)
             else -> {
                 adapter ?: return "no Bluetooth adapter"
+                DiagCommand.targetRefusal(cmd, savedRadio(context))?.let { return it }
                 when (cmd) {
                     DiagCommand.Bonded -> adapter.bondedDevices.joinToString("\n") { describeDevice(it) }
                         .ifEmpty { "no bonded devices" }
@@ -343,20 +347,29 @@ object DiagnosticsLink {
             return "$label ${if (cmd.secure) "secure" else "insecure"}: create failed: ${describe(e)}"
         }
         val started = System.currentTimeMillis()
-        // connect() blocks and ignores coroutine cancellation; closing the socket interrupts it.
-        val watchdog = scope.launch { delay(20_000); runCatching { socket.close() } }
+        val mode = if (cmd.secure) "secure" else "insecure"
+        // connect() blocks and ignores cancellation; the watchdog closes the socket on its
+        // 20 s deadline or when the session is stopped (cancellation runs its finally).
         return try {
-            socket.connect()
-            val took = System.currentTimeMillis() - started
-            val bytes = readFor(socket, cmd.readMs)
-            "$label ${if (cmd.secure) "secure" else "insecure"}: CONNECTED in ${took} ms; " +
-                "read ${bytes.size} bytes in ${cmd.readMs} ms" +
-                if (bytes.isEmpty()) "" else ": " + bytes.take(64).joinToString(" ") { "%02x".format(it) }
+            coroutineScope {
+                val watchdog = launch {
+                    try { delay(20_000) } finally { runCatching { socket.close() } }
+                }
+                try {
+                    runInterruptible(Dispatchers.IO) { socket.connect() }
+                    val took = System.currentTimeMillis() - started
+                    val bytes = readFor(socket, cmd.readMs)
+                    "$label $mode: CONNECTED in ${took} ms; read ${bytes.size} bytes in ${cmd.readMs} ms" +
+                        if (bytes.isEmpty()) "" else ": " + bytes.take(64).joinToString(" ") { "%02x".format(it) }
+                } finally {
+                    watchdog.cancel()
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            "$label ${if (cmd.secure) "secure" else "insecure"}: connect failed after " +
-                "${System.currentTimeMillis() - started} ms: ${describe(e)}"
+            "$label $mode: connect failed after ${System.currentTimeMillis() - started} ms: ${describe(e)}"
         } finally {
-            watchdog.cancel()
             runCatching { socket.close() }
         }
     }

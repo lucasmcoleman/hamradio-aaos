@@ -261,7 +261,7 @@ private fun LogRow(entry: LogEntry) {
 private fun DiagnosticsLinkCard() {
     val context = LocalContext.current
     val status by DiagnosticsLink.status.collectAsStateWithLifecycle()
-    val on = status is DiagnosticsLink.Status.Listening
+    val on = status is DiagnosticsLink.Status.Listening || status is DiagnosticsLink.Status.AwaitingApproval
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -278,11 +278,18 @@ private fun DiagnosticsLinkCard() {
                     style = MaterialTheme.typography.labelLarge,
                     fontFamily = FontFamily.Monospace,
                 )
+                Fingerprint(s.fingerprint)
                 Text(
-                    if (s.clients > 0) "PC connected" else "Waiting for the PC. Turns off after 30 min.",
+                    if (s.clientConnected) "PC connected" else "Waiting for the PC. Turns off after 30 min.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (s.clients > 0) RxGreen else OnSurfaceMuted,
+                    color = if (s.clientConnected) RxGreen else OnSurfaceMuted,
                 )
+            }
+            is DiagnosticsLink.Status.AwaitingApproval -> {
+                Text("Allow ${s.peer} to run Bluetooth tests?", style = MaterialTheme.typography.bodyMedium, color = Accent)
+                Fingerprint(s.fingerprint)
+                QuickCmd("ALLOW") { DiagnosticsLink.answer(true) }
+                QuickCmd("DENY") { DiagnosticsLink.answer(false) }
             }
             is DiagnosticsLink.Status.Failed ->
                 Text(s.reason, style = MaterialTheme.typography.bodySmall, color = TxRed)
@@ -294,6 +301,17 @@ private fun DiagnosticsLinkCard() {
             if (on) DiagnosticsLink.stop() else DiagnosticsLink.start(context)
         }
     }
+}
+
+@Composable
+private fun Fingerprint(value: String) {
+    // Four rows of 8 bytes so it can be read off the screen and checked against the pin.
+    Text(
+        "Key\n" + value.split(":").chunked(8).joinToString("\n") { it.joinToString(":") },
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp),
+        color = OnSurfaceMuted,
+        fontFamily = FontFamily.Monospace,
+    )
 }
 
 @Composable

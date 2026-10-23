@@ -99,7 +99,27 @@ sealed class DiagCommand {
             return Rfcomm(addr, uuid, null, secure, readMs)
         }
 
-        /** Only Lucas's PC, or loopback (reachable only through adb forward). */
+        /** Bluetooth address a command acts on, if any (only the saved radio is allowed). */
+        fun targetAddress(cmd: DiagCommand): String? = when (cmd) {
+            is Uuids -> cmd.address
+            is Bond -> cmd.address
+            is Gatt -> cmd.address
+            is Rfcomm -> cmd.address
+            else -> null
+        }
+
+        /** Refusal text when [cmd] targets anything but [savedRadio], else null. */
+        fun targetRefusal(cmd: DiagCommand, savedRadio: String?): String? {
+            val target = targetAddress(cmd) ?: return null
+            if (target == savedRadio?.uppercase()) return null
+            return "refused: $target is not the radio saved in the app (${savedRadio ?: "none saved"})"
+        }
+
+        /**
+         * Pre-filter only, to keep stray LAN connections from raising the Allow prompt:
+         * Lucas's PC or loopback (adb forward). Authentication is the pinned TLS client
+         * certificate plus the on-screen approval, not this check.
+         */
         fun isAllowedPeer(peer: InetAddress, allowedHost: String): Boolean =
             peer.isLoopbackAddress || peer.hostAddress == allowedHost
     }
