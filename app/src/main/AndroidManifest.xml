@@ -10,6 +10,9 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Diagnostics link: LAN socket to Lucas's PC while switched on (job #875) -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Foreground service keeps the radio link alive while another app is in front -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />

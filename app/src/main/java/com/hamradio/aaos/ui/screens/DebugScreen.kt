@@ -33,6 +33,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.platform.LocalContext
+import com.hamradio.aaos.diag.DiagnosticsLink
 import com.hamradio.aaos.radio.LogDir
 import com.hamradio.aaos.radio.LogEntry
 import com.hamradio.aaos.radio.protocol.BasicCommand
@@ -119,6 +121,8 @@ fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            DiagnosticsLinkCard()
+
             // Device info card
             if (devInfo != null) {
                 val d = devInfo!!
@@ -189,7 +193,7 @@ fun DebugScreen(vm: MainViewModel, onClose: () -> Unit = {}) {
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
-                    text  = if (isMock) "MOCK TRANSPORT" else "BLE TRANSPORT",
+                    text  = if (isMock) "MOCK TRANSPORT" else "RADIO TRANSPORT",
                     style = MaterialTheme.typography.labelLarge,
                     color = if (isMock) Accent else RxGreen,
                 )
@@ -250,6 +254,45 @@ private fun LogRow(entry: LogEntry) {
             color = OnSurfaceMuted,
             fontFamily = FontFamily.Monospace,
         )
+    }
+}
+
+@Composable
+private fun DiagnosticsLinkCard() {
+    val context = LocalContext.current
+    val status by DiagnosticsLink.status.collectAsStateWithLifecycle()
+    val on = status is DiagnosticsLink.Status.Listening
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(SurfaceCard)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("Diagnostics Link", style = MaterialTheme.typography.titleMedium, color = Accent)
+        when (val s = status) {
+            is DiagnosticsLink.Status.Listening -> {
+                Text(
+                    s.addresses.joinToString("\n").ifEmpty { "No network. Join Wi-Fi first." },
+                    style = MaterialTheme.typography.labelLarge,
+                    fontFamily = FontFamily.Monospace,
+                )
+                Text(
+                    if (s.clients > 0) "PC connected" else "Waiting for the PC. Turns off after 30 min.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (s.clients > 0) RxGreen else OnSurfaceMuted,
+                )
+            }
+            is DiagnosticsLink.Status.Failed ->
+                Text(s.reason, style = MaterialTheme.typography.bodySmall, color = TxRed)
+            DiagnosticsLink.Status.Off ->
+                Text("Lets Claude's PC run Bluetooth tests in this app over home Wi-Fi.",
+                    style = MaterialTheme.typography.bodySmall, color = OnSurfaceMuted)
+        }
+        QuickCmd(if (on) "TURN OFF" else "TURN ON") {
+            if (on) DiagnosticsLink.stop() else DiagnosticsLink.start(context)
+        }
     }
 }
 
