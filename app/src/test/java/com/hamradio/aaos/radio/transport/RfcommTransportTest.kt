@@ -28,6 +28,7 @@ class RfcommTransportTest {
         every { manager.adapter } returns adapter
         every { adapter.cancelDiscovery() } returns true
         every { adapter.getRemoteDevice(any<String>()) } returns device
+        every { device.bondState } returns BluetoothDevice.BOND_BONDED
         every { device.createRfcommSocketToServiceRecord(any()) } returns socket
         every { socket.inputStream } returns input
         every { socket.outputStream } returns output
@@ -36,6 +37,7 @@ class RfcommTransportTest {
         mockkStatic(Log::class)
         every { Log.i(any(), any()) } returns 0
         every { Log.e(any<String>(), any<String>()) } returns 0
+        every { Log.w(any<String>(), any<String>()) } returns 0
     }
     @After fun cleanup() { scope.cancel(); unmockkAll() }
 
@@ -90,5 +92,43 @@ class RfcommTransportTest {
         assertEquals(ConnectionState.ERROR, transport.connectionState.value)
         assertFalse(transport.isConnected)
         transport.disconnect()
+    }
+
+    @Test fun secureConnectFailureFallsBackToInsecure() = runBlocking {
+        val insecure = mockk<BluetoothSocket>()
+        every { socket.connect() } throws java.io.IOException("read failed, socket might closed")
+        every { socket.close() } just Runs
+        every { device.createInsecureRfcommSocketToServiceRecord(any()) } returns insecure
+        every { insecure.connect() } just Runs
+        every { insecure.inputStream } returns input
+        every { insecure.outputStream } returns output
+        every { insecure.close() } just Runs
+        val transport = RfcommTransport(context, "00:11:22:33:44:55", scope)
+        transport.connect()
+        assertEquals(ConnectionState.CONNECTED, transport.connectionState.value)
+        verify { insecure.connect() }
+        transport.disconnect()
+    }
+
+    @Test fun unpairedRadioIsBondedBeforeConnecting() = runBlocking {
+        var state = BluetoothDevice.BOND_NONE
+        every { device.bondState } answers { state }
+        every { device.createBond() } answers { state = BluetoothDevice.BOND_BONDED; true }
+        every { socket.connect() } just Runs
+        every { socket.close() } just Runs
+        val transport = RfcommTransport(context, "00:11:22:33:44:55", scope)
+        transport.connect()
+        verifyOrder { device.createBond(); socket.connect() }
+        assertEquals(ConnectionState.CONNECTED, transport.connectionState.value)
+        transport.disconnect()
+    }
+
+    @Test fun declinedPairingSurfacesAnError() = runBlocking {
+        every { device.bondState } returns BluetoothDevice.BOND_NONE
+        every { device.createBond() } returns false
+        val transport = RfcommTransport(context, "00:11:22:33:44:55", scope)
+        val error = runCatching { transport.connect() }.exceptionOrNull()
+        assertTrue(error?.message.orEmpty().contains("pairing"))
+        assertEquals(ConnectionState.ERROR, transport.connectionState.value)
     }
 }

@@ -1,6 +1,7 @@
 package com.hamradio.aaos.radio.transport
 
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
@@ -36,6 +37,7 @@ import kotlin.coroutines.resumeWithException
 
 private const val TAG = "RfcommTransport"
 private val SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
+private const val BOND_TIMEOUT_MS = 30_000L
 
 /**
  * Classic Bluetooth RFCOMM transport for GAIA-framed Benshi messages.
@@ -77,28 +79,56 @@ class RfcommTransport(
             // Coroutine cancellation must close the socket even while connect() blocks.
             continuation.invokeOnCancellation { finish(attempt, ConnectionState.DISCONNECTED) }
             previous?.let { close(it) }
+            var failure: IOException? = null
             try {
                 if (!continuation.isActive || !owns(attempt)) return@suspendCancellableCoroutine
                 val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
                 val adapter = manager?.adapter ?: throw IOException("BluetoothAdapter not available")
                 adapter.cancelDiscovery()
                 val device = adapter.getRemoteDevice(deviceAddress)
-                val socket = try {
-                    device.createRfcommSocketToServiceRecord(SPP_UUID)
-                } catch (e: IOException) {
-                    Log.w(TAG, "SPP socket creation failed, trying insecure fallback", e)
-                    device.createInsecureRfcommSocketToServiceRecord(SPP_UUID)
+                val live = { continuation.isActive && owns(attempt) }
+                ensureBonded(device, live)
+                // Head units are stricter than phones: a secure SPP connect can fail where an
+                // insecure one or a direct channel works, so try each before giving up.
+                val methods = listOf<Pair<String, () -> BluetoothSocket>>(
+                    "secure" to { device.createRfcommSocketToServiceRecord(SPP_UUID) },
+                    "insecure" to { device.createInsecureRfcommSocketToServiceRecord(SPP_UUID) },
+                    "channel 1" to { directChannelSocket(device, 1) },
+                )
+                val errors = mutableListOf<String>()
+                var socket: BluetoothSocket? = null
+                for ((label, create) in methods) {
+                    if (!live()) break
+                    val candidate = try { create() } catch (e: Exception) {
+                        errors += "$label: ${e.message}"
+                        continue
+                    }
+                    val attached = synchronized(ownership) {
+                        if (current === attempt && continuation.isActive) {
+                            attempt.socket = candidate
+                            true
+                        } else false
+                    }
+                    if (!attached) {
+                        try { candidate.close() } catch (_: IOException) {}
+                        break
+                    }
+                    try {
+                        candidate.connect()
+                        socket = candidate
+                        Log.i(TAG, "RFCOMM $label connect succeeded")
+                        break
+                    } catch (e: IOException) {
+                        errors += "$label: ${e.message}"
+                        Log.w(TAG, "RFCOMM $label connect failed: ${e.message}")
+                        synchronized(ownership) { if (attempt.socket === candidate) attempt.socket = null }
+                        try { candidate.close() } catch (_: IOException) {}
+                        Thread.sleep(300)
+                    }
                 }
-                val attached = synchronized(ownership) {
-                    if (current === attempt && continuation.isActive) {
-                        attempt.socket = socket
-                        true
-                    } else false
-                }
-                if (!attached) {
-                    try { socket.close() } catch (_: IOException) {}
+                if (socket == null) {
+                    if (live()) throw IOException("could not open the radio link (${errors.joinToString("; ")})")
                 } else {
-                    socket.connect()
                     val input = socket.inputStream
                     val output = socket.outputStream
                     val reader = scope.launch(start = CoroutineStart.LAZY) { readLoop(attempt, input) }
@@ -122,17 +152,47 @@ class RfcommTransport(
             } catch (e: IOException) {
                 Log.e(TAG, "RFCOMM connect failed: ${e.message}")
                 finish(attempt, ConnectionState.ERROR)
+                failure = e
             } catch (e: SecurityException) {
                 Log.e(TAG, "Missing Bluetooth permission", e)
                 finish(attempt, ConnectionState.ERROR)
+                failure = IOException("Bluetooth permission is missing")
             } catch (e: IllegalArgumentException) {
                 Log.e(TAG, "Invalid Bluetooth device address", e)
                 finish(attempt, ConnectionState.ERROR)
+                failure = IOException("invalid Bluetooth address $deviceAddress")
             } finally {
-                if (continuation.isActive) continuation.resume(Unit)
+                // Real failures surface to the controller so the user sees why; cancellation stays silent.
+                if (continuation.isActive) {
+                    val error = failure
+                    if (error != null) continuation.resumeWithException(error) else continuation.resume(Unit)
+                }
             }
         }
     }
+
+    /** Pair first when needed so the head unit shows its pairing prompt instead of failing the socket. */
+    private fun ensureBonded(device: BluetoothDevice, live: () -> Boolean) {
+        if (device.bondState == BluetoothDevice.BOND_BONDED) return
+        if (device.bondState == BluetoothDevice.BOND_NONE && !device.createBond()) {
+            throw IOException("pairing with the radio could not start")
+        }
+        Log.i(TAG, "Waiting for pairing with $deviceAddress")
+        val deadline = System.currentTimeMillis() + BOND_TIMEOUT_MS
+        while (live() && System.currentTimeMillis() < deadline) {
+            when (device.bondState) {
+                BluetoothDevice.BOND_BONDED -> return
+                BluetoothDevice.BOND_NONE -> throw IOException("pairing with the radio was declined or failed")
+            }
+            Thread.sleep(250)
+        }
+        if (live()) throw IOException("pairing with the radio timed out")
+    }
+
+    /** Hidden-API fallback for stacks whose SDP lookup of the SPP record fails. */
+    private fun directChannelSocket(device: BluetoothDevice, channel: Int): BluetoothSocket =
+        device.javaClass.getMethod("createRfcommSocket", Int::class.javaPrimitiveType)
+            .invoke(device, channel) as BluetoothSocket
 
     override suspend fun send(message: BenshiMessage) {
         val connection = synchronized(ownership) {

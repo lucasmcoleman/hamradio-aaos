@@ -207,7 +207,7 @@ class RadioController internal constructor(
                     target.inboundMessages.collect { if (generation == epoch.get()) handleInbound(it) }
                 }
                 try {
-                    withTimeout(20_000L) { target.connect() }
+                    withTimeout(60_000L) { target.connect() }  // room for the pairing prompt
                     if (target.isConnected) {
                         coroutineScope {
                             val init = launch { initializeRadio() }
