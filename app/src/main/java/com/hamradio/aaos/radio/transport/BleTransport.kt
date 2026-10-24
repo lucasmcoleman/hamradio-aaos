@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -32,11 +33,12 @@ import java.io.IOException
 import java.util.UUID
 
 private const val TAG = "BleTransport"
-// Android allows one GATT write in flight. A write that hasn't been acked keeps the stack
-// busy, so wait for the ack well past the first silence and retry "busy" starts instead of
-// dropping the message (the 10-23 truck test lost every command after one slow ack).
-private const val WRITE_ACK_TIMEOUT_MS = 6_000L
-private const val WRITE_BUSY_RETRY_MS = 6_000L
+// Android allows one GATT write in flight and its write callback carries no id, so a write
+// owns the link until its callback arrives. If it never does, the session is failed rather
+// than letting the next write claim the late callback (codex #947). The 10-23 truck test
+// dropped every command after one unacked write.
+private const val WRITE_ACK_TIMEOUT_MS = 10_000L
+private const val WRITE_BUSY_RETRY_MS = 3_000L
 private const val WRITE_BUSY_POLL_MS = 50L
 
 // Benshi BLE GATT UUIDs (same across all Benshi-family radios)
@@ -240,24 +242,17 @@ class BleTransport(
 
     /** GATT allows one outstanding write, so wait for each write's callback before the next. */
     private suspend fun sendWorker(session: Session) {
-        for (bytes in session.sendChannel) {
-            val char = session.writeCharacteristic
-            val g = session.gatt
-            if (char == null || g == null) {
-                Log.w(TAG, "GATT or characteristic null, dropping message")
-                continue
-            }
-            while (session.writeAcks.tryReceive().isSuccess) Unit   // a late ack from an earlier write
-            val result = deliverWrite(
-                tryStart = { startWrite(g, char, bytes, session.writeType) },
-                awaitAck = { withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) { session.writeAcks.receive() } },
-            )
-            when (result) {
-                WriteResult.Acked -> Unit
-                WriteResult.NeverStarted -> Log.w(TAG, "BLE write could not start after ${WRITE_BUSY_RETRY_MS} ms, dropped (${bytes.toHexString()})")
-                is WriteResult.Failed -> Log.w(TAG, "BLE write failed or timed out (status ${result.status}) (${bytes.toHexString()})")
-            }
-        }
+        runWriteQueue(
+            queue = session.sendChannel,
+            tryStart = { bytes ->
+                val char = session.writeCharacteristic
+                val g = session.gatt
+                char != null && g != null && startWrite(g, char, bytes, session.writeType)
+            },
+            awaitAck = { withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) { session.writeAcks.receive() } },
+            onRejected = { bytes, status -> Log.w(TAG, "BLE write rejected (status $status) (${bytes.toHexString()})") },
+            onFatal = { reason -> session.fail(reason) },
+        )
     }
 
     private fun startWrite(g: BluetoothGatt, char: BluetoothGattCharacteristic, bytes: ByteArray, type: Int): Boolean =
@@ -273,10 +268,35 @@ class BleTransport(
         }
 }
 
+/**
+ * Sends [queue] one write at a time. A write that never starts or never gets its callback
+ * ends the queue through [onFatal]: the late callback could otherwise be taken as the next
+ * write's ack, so nothing more is written on that session and the controller reconnects.
+ */
+internal suspend fun runWriteQueue(
+    queue: ReceiveChannel<ByteArray>,
+    tryStart: (ByteArray) -> Boolean,
+    awaitAck: suspend () -> Int?,
+    onRejected: (ByteArray, Int) -> Unit,
+    onFatal: (String) -> Unit,
+    busyRetryMs: Long = WRITE_BUSY_RETRY_MS,
+    pollMs: Long = WRITE_BUSY_POLL_MS,
+) {
+    for (bytes in queue) {
+        when (val result = deliverWrite({ tryStart(bytes) }, awaitAck, busyRetryMs, pollMs)) {
+            WriteResult.Acked -> Unit
+            is WriteResult.Failed -> onRejected(bytes, result.status)
+            WriteResult.NeverStarted -> return onFatal("BLE write could not start for $busyRetryMs ms (${bytes.toHexString()})")
+            WriteResult.NoAck -> return onFatal("BLE write got no answer (${bytes.toHexString()})")
+        }
+    }
+}
+
 internal sealed class WriteResult {
     object Acked : WriteResult()
     object NeverStarted : WriteResult()
-    data class Failed(val status: Int?) : WriteResult()
+    object NoAck : WriteResult()
+    data class Failed(val status: Int) : WriteResult()
 }
 
 /** Write with a response when the radio offers it, else without. */
@@ -287,8 +307,10 @@ internal fun writeTypeFor(properties: Int): Int =
     else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
 
 /**
- * One GATT write: retry the start while the stack reports busy (an earlier write is still in
- * flight), then wait for its ack. Status 0 is GATT_SUCCESS.
+ * One GATT write: retry the start while the stack reports busy, then wait for its callback.
+ * The caller starts nothing else until this returns, so the callback can only be this write's.
+ * [NoAck][WriteResult.NoAck] means the callback may still arrive later; the caller must not
+ * write again on that session. Status 0 is GATT_SUCCESS.
  */
 internal suspend fun deliverWrite(
     tryStart: () -> Boolean,
@@ -302,7 +324,7 @@ internal suspend fun deliverWrite(
         delay(pollMs)
         waited += pollMs
     }
-    val status = awaitAck()
+    val status = awaitAck() ?: return WriteResult.NoAck
     return if (status == 0) WriteResult.Acked else WriteResult.Failed(status)
 }
 

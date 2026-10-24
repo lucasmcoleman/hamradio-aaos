@@ -288,9 +288,16 @@ object DiagnosticsLink {
      * saved radio only; other devices are counted, not listed.
      */
     private suspend fun scan(context: Context, adapter: BluetoothAdapter, radio: String?): String {
+        // Settle any earlier discovery first: broadcasts sent before we register can't reach
+        // us, and the watch ignores a FINISHED that isn't preceded by our own STARTED (codex #947).
+        if (adapter.isDiscovering) {
+            adapter.cancelDiscovery()
+            withTimeoutOrNull(5_000) { while (adapter.isDiscovering) delay(100) }
+            delay(300)
+        }
         val seen = mutableSetOf<String>()
         val radioHits = mutableListOf<String>()
-        val finished = CompletableDeferred<Unit>()
+        val watch = DiscoveryWatch()
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
                 when (intent.action) {
@@ -304,18 +311,20 @@ object DiagnosticsLink {
                             }
                         }
                     }
-                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> finished.complete(Unit)
+                    BluetoothAdapter.ACTION_DISCOVERY_STARTED -> watch.onStarted()
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> watch.onFinished()
                 }
             }
         }
         val filter = IntentFilter(BluetoothDevice.ACTION_FOUND).apply {
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_STARTED)
             addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
         }
         register(context, receiver, filter)
         return try {
-            adapter.cancelDiscovery()
+            watch.arm()
             val started = adapter.startDiscovery()
-            if (started) withTimeoutOrNull(12_000) { finished.await() }
+            if (started) withTimeoutOrNull(12_000) { watch.finished.await() }
             synchronized(seen) {
                 buildString {
                     appendLine("discovery started=$started, ${seen.size} device(s) answered")
