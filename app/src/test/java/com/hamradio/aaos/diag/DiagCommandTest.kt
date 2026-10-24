@@ -26,6 +26,18 @@ class DiagCommandTest {
         assertEquals(UUID.fromString(full), (DiagCommand.parse("rfcomm $radio $full secure") as DiagCommand.Rfcomm).uuid)
     }
 
+    @Test fun parsesBondAndPairWatchOptions() {
+        assertEquals(DiagCommand.Bond(radio), DiagCommand.parse("bond $radio"))
+        assertEquals(DiagCommand.Bond(radio, "0000", null), DiagCommand.parse("bond $radio pin:0000"))
+        assertEquals(DiagCommand.Bond(radio, "1234", "bredr"), DiagCommand.parse("bond $radio bredr pin:1234"))
+        assertEquals(DiagCommand.PairWatch(60), DiagCommand.parse("pairwatch"))
+        assertEquals(DiagCommand.PairWatch(90, "0000"), DiagCommand.parse("pairwatch pin:0000 90"))
+        listOf(
+            "bond $radio pin:12", "bond $radio pin:abcd", "bond $radio le le", "bond $radio pin:0000 pin:1111",
+            "pairwatch 5", "pairwatch 121", "pairwatch 30 30", "pairwatch pin:1",
+        ).forEach { assertTrue(it, DiagCommand.parse(it) is DiagCommand.Invalid) }
+    }
+
     @Test fun refusesAnythingElse() {
         listOf(
             "", "sh -c id", "prop ro.x;rm", "uuids notamac", "rfcomm $radio ch:99 secure",

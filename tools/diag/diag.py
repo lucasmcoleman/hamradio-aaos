@@ -47,7 +47,7 @@ def main():
         ctx.load_cert_chain(KEY_DIR / "pc-client.crt", KEY_DIR / "pc-client.key")
 
     log = Path(__file__).with_name(f"diag-{host}.log")
-    with socket.create_connection((host, port), timeout=90) as raw:
+    with socket.create_connection((host, port), timeout=180) as raw:
         with ctx.wrap_socket(raw) as s:
             got = hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest()
             if got != pin:

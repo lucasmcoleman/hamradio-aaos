@@ -16,7 +16,11 @@ sealed class DiagCommand {
     object Scan : DiagCommand()
     data class Prop(val key: String) : DiagCommand()
     data class Uuids(val address: String) : DiagCommand()
-    data class Bond(val address: String) : DiagCommand()
+    /** Pair, answering a PIN request with [pin] if given; [transport] "bredr"/"le" forces one (null = auto). */
+    data class Bond(val address: String, val pin: String? = null, val transport: String? = null) : DiagCommand()
+
+    /** Wait [seconds] for a pairing request from the saved radio (Pair pressed on the radio). */
+    data class PairWatch(val seconds: Int, val pin: String? = null) : DiagCommand()
     data class Gatt(val address: String) : DiagCommand()
     data class Log(val lines: Int) : DiagCommand()
 
@@ -45,7 +49,12 @@ sealed class DiagCommand {
   uuids <addr>                 cached + fresh SDP service UUIDs of a device
   rfcomm <addr> <uuid|1101|ch:N> <secure|insecure> [readMs]
                                open an RFCOMM socket, read briefly, close
-  bond <addr>                  start pairing and report bond state changes
+  bond <addr> [pin:NNNN] [bredr|le]
+                               start pairing and report the pairing request type and
+                               bond state changes; a PIN request is answered with NNNN
+  pairwatch [seconds] [pin:NNNN]
+                               wait (default 60 s) for the saved radio to ask to pair
+                               and report it; a PIN request is answered with NNNN
   gatt <addr>                  list a device's BLE services
   log [lines]                  this app's recent log
   off                          turn the link off"""
@@ -64,7 +73,8 @@ sealed class DiagCommand {
                 "prop" -> args.singleOrNull()?.takeIf { PROP_KEY.matches(it) }?.let { Prop(it) }
                     ?: Invalid("usage: prop <key>")
                 "uuids" -> address(args)?.let { Uuids(it) } ?: Invalid("usage: uuids <addr>")
-                "bond" -> address(args)?.let { Bond(it) } ?: Invalid("usage: bond <addr>")
+                "bond" -> parseBond(args)
+                "pairwatch" -> parsePairWatch(args)
                 "gatt" -> address(args)?.let { Gatt(it) } ?: Invalid("usage: gatt <addr>")
                 "log" -> {
                     val n = args.firstOrNull()?.toIntOrNull() ?: 200
@@ -77,6 +87,42 @@ sealed class DiagCommand {
 
         private fun address(args: List<String>): String? =
             args.singleOrNull()?.uppercase()?.takeIf { ADDRESS.matches(it) }
+
+        private val PIN = Regex("^pin:([0-9]{4,16})$")
+
+        private fun parseBond(args: List<String>): DiagCommand {
+            val usage = Invalid("usage: bond <addr> [pin:NNNN] [bredr|le]")
+            if (args.size !in 1..3) return usage
+            val addr = address(args.take(1)) ?: return usage
+            var pin: String? = null
+            var transport: String? = null
+            for (a in args.drop(1)) {
+                val m = PIN.matchEntire(a)
+                when {
+                    m != null && pin == null -> pin = m.groupValues[1]
+                    a.lowercase() in setOf("bredr", "le") && transport == null -> transport = a.lowercase()
+                    else -> return usage
+                }
+            }
+            return Bond(addr, pin, transport)
+        }
+
+        private fun parsePairWatch(args: List<String>): DiagCommand {
+            val usage = Invalid("usage: pairwatch [10-120] [pin:NNNN]")
+            if (args.size > 2) return usage
+            var seconds: Int? = null
+            var pin: String? = null
+            for (a in args) {
+                val m = PIN.matchEntire(a)
+                when {
+                    m != null && pin == null -> pin = m.groupValues[1]
+                    a.toIntOrNull() != null && seconds == null -> seconds = a.toInt()
+                    else -> return usage
+                }
+            }
+            val s = seconds ?: 60
+            return if (s in 10..120) PairWatch(s, pin) else usage
+        }
 
         private fun parseRfcomm(args: List<String>): DiagCommand {
             val usage = Invalid("usage: rfcomm <addr> <uuid|1101|ch:N> <secure|insecure> [readMs]")

@@ -1038,14 +1038,18 @@ private fun ConnectionSheet(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                if (connState == ConnectionState.CONNECTED) {
+                // Any state but DISCONNECTED means the session loop is live (connecting, or
+                // retrying every 5 s after an error), so it can always be stopped (#15939).
+                if (connState != ConnectionState.DISCONNECTED) {
                     OutlinedButton(
                         onClick  = { vm.disconnect() },
                         modifier = Modifier.weight(1f),
                         colors   = ButtonDefaults.outlinedButtonColors(contentColor = TxRed),
                         border   = androidx.compose.foundation.BorderStroke(1.dp, TxRed.copy(0.5f)),
-                    ) { Text("Disconnect") }
-                } else {
+                    ) { Text(if (connState == ConnectionState.CONNECTED) "Disconnect" else "Stop") }
+                }
+                if (connState != ConnectionState.CONNECTED && connState != ConnectionState.CONNECTING &&
+                    connState != ConnectionState.SCANNING) {
                     FilledTonalButton(
                         onClick  = { vm.connect() },
                         modifier = Modifier.weight(1f),
