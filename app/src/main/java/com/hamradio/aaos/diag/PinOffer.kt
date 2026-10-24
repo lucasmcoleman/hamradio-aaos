@@ -3,42 +3,63 @@ package com.hamradio.aaos.diag
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /** Offsets from the start of BONDING at which a PIN is offered without a pairing request. */
 internal val PIN_OFFER_AT_MS = listOf(1_000L, 3_000L, 6_000L)
 
 /**
+ * One pairing attempt's permission to touch Bluetooth. Once [close]d it stays closed, and
+ * [runIfOpen] holds the same lock as [close], so no action can start after close returns
+ * (codex #956).
+ */
+internal class AttemptGate {
+    private val lock = Any()
+    private var closed = false
+
+    fun close() = synchronized(lock) { closed = true }
+
+    /** Runs [action] only while open; [ready] is checked under the lock right before it. */
+    fun <T> runIfOpen(ready: () -> Boolean = { true }, action: () -> T): T? = synchronized(lock) {
+        if (closed || !ready() || closed) null else action()
+    }
+}
+
+/**
  * Unprompted PIN offers for one pairing attempt (ACTION_PAIRING_REQUEST may only reach
- * privileged apps). Runs in the attempt's own [scope] and is cancelled when the bond settles
- * or the attempt ends, so an offer can never land on a later attempt (codex #955).
+ * privileged apps). Starts at most once per attempt, and every offer goes through the
+ * attempt's [gate], so nothing fires after the bond settles or the attempt ends.
  */
 internal class PinOffer(
     private val scope: CoroutineScope,
+    private val gate: AttemptGate,
     private val stillBonding: () -> Boolean,
     private val offer: () -> String,
     private val report: (String) -> Unit,
     private val atMs: List<Long> = PIN_OFFER_AT_MS,
 ) {
+    private var started = false
     private var job: Job? = null
 
     @Synchronized fun onBonding() {
-        if (job?.isActive == true) return
+        if (started) return
+        started = true
         job = scope.launch {
             var elapsed = 0L
             atMs.forEachIndexed { i, at ->
                 delay(at - elapsed)
                 elapsed = at
-                if (!isActive || !stillBonding()) return@launch
-                report("unprompted PIN offer ${i + 1} at ${at / 1000} s: ${offer()}")
+                val result = gate.runIfOpen(stillBonding, offer) ?: return@launch
+                report("unprompted PIN offer ${i + 1} at ${at / 1000} s: $result")
             }
         }
     }
 
-    @Synchronized fun cancel() {
+    /** Closes the attempt's gate (permanent) and stops the schedule. */
+    @Synchronized fun close() {
+        started = true
+        gate.close()
         job?.cancel()
-        job = null
     }
 }
 

@@ -379,9 +379,11 @@ object DiagnosticsLink {
         body: suspend (Channel<String>) -> String,
     ): String = coroutineScope {
         val events = Channel<String>(Channel.UNLIMITED)
+        val gate = AttemptGate()
         val offer = pin?.let {
             PinOffer(
                 scope = this,
+                gate = gate,
                 stillBonding = { runCatching { device.bondState == BluetoothDevice.BOND_BONDING }.getOrDefault(false) },
                 offer = { setPinResult(device, it) },
                 report = { events.trySend(it) },
@@ -392,7 +394,7 @@ object DiagnosticsLink {
                 val d = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
                 if (d?.address?.uppercase() != device.address.uppercase()) return
                 if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
-                    events.trySend(answerPairingRequest(d, intent, pin))
+                    events.trySend(answerPairingRequest(d, intent, pin, gate))
                     return
                 }
                 val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
@@ -401,7 +403,8 @@ object DiagnosticsLink {
                 events.trySend("bond $prev -> $state (reason $reason)")
                 if (state == BluetoothDevice.BOND_BONDING) offer?.onBonding()
                 if (state == BluetoothDevice.BOND_BONDED || state == BluetoothDevice.BOND_NONE) {
-                    offer?.cancel()
+                    offer?.close()
+                    gate.close()
                     events.close()
                 }
             }
@@ -414,7 +417,8 @@ object DiagnosticsLink {
         try {
             body(events)
         } finally {
-            offer?.cancel()
+            offer?.close()
+            gate.close()                    // before unregistering: late broadcasts can't act
             runCatching { context.unregisterReceiver(receiver) }
         }
     }
@@ -448,14 +452,17 @@ object DiagnosticsLink {
     }
 
     /** Reports the pairing variant and answers a PIN request; confirming a passkey needs a privileged app. */
-    private fun answerPairingRequest(device: BluetoothDevice, intent: Intent, pin: String?): String {
+    private fun answerPairingRequest(device: BluetoothDevice, intent: Intent, pin: String?, gate: AttemptGate): String {
         val variant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
         val hasKey = intent.hasExtra(BluetoothDevice.EXTRA_PAIRING_KEY)
         val action = when {
-            (variant == BluetoothDevice.PAIRING_VARIANT_PIN || variant == 7) && pin != null -> setPinResult(device, pin)
+            (variant == BluetoothDevice.PAIRING_VARIANT_PIN || variant == 7) && pin != null ->
+                gate.runIfOpen { setPinResult(device, pin) } ?: "attempt over; not answered"
             variant == BluetoothDevice.PAIRING_VARIANT_PASSKEY_CONFIRMATION || variant == 3 ->
-                runCatching { "setPairingConfirmation=${device.setPairingConfirmation(true)}" }
-                    .getOrElse { "setPairingConfirmation failed: ${it.javaClass.simpleName}" }
+                gate.runIfOpen {
+                    runCatching { "setPairingConfirmation=${device.setPairingConfirmation(true)}" }
+                        .getOrElse { "setPairingConfirmation failed: ${it.javaClass.simpleName}" }
+                } ?: "attempt over; not answered"
             else -> "not answered"
         }
         return pairingRequestText(variant, hasKey, action)

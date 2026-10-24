@@ -7,17 +7,28 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** Unprompted PIN offers must stay inside their own pairing attempt (codex #955). */
+/** Unprompted PIN offers and request answers must stay inside their own pairing attempt (codex #955/#956). */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PinOfferTest {
     private class Probe(scope: TestScope, var bonding: Boolean = true) {
+        val gate = AttemptGate()
         var offers = 0
+        var beforeCheck: () -> Unit = {}
         val reports = mutableListOf<String>()
-        val offer = PinOffer(scope.backgroundScope, { bonding }, { offers++; "setPin=true" }, { reports += it })
+        val offer = PinOffer(
+            scope.backgroundScope, gate,
+            stillBonding = { beforeCheck(); bonding },
+            offer = { offers++; "setPin=true" },
+            report = { reports += it },
+        )
     }
+
+    // backgroundScope work is skipped by advanceUntilIdle, so time is advanced explicitly
+    private fun TestScope.runPast6s() { advanceTimeBy(10_000); runCurrent() }
 
     @Test fun offersAtEachStepWhileBonding() = runTest {
         val p = Probe(this)
@@ -26,17 +37,17 @@ class PinOfferTest {
         assertEquals(0, p.offers)
         advanceTimeBy(1); runCurrent()
         assertEquals(1, p.offers)
-        advanceTimeBy(10_000); runCurrent()   // backgroundScope work is skipped by advanceUntilIdle
+        runPast6s()
         assertEquals(3, p.offers)
         assertTrue(p.reports.last().startsWith("unprompted PIN offer 3 at 6 s"))
     }
 
-    @Test fun cancelStopsLaterOffers() = runTest {
+    @Test fun closeStopsLaterOffers() = runTest {
         val p = Probe(this)
         p.offer.onBonding()
         advanceTimeBy(1_500); runCurrent()
-        p.offer.cancel()                      // bond settled or the attempt ended
-        advanceTimeBy(10_000); runCurrent()   // backgroundScope work is skipped by advanceUntilIdle
+        p.offer.close()
+        runPast6s()
         assertEquals(1, p.offers)
     }
 
@@ -44,7 +55,7 @@ class PinOfferTest {
         val p = Probe(this)
         p.offer.onBonding()
         p.bonding = false
-        advanceTimeBy(10_000); runCurrent()   // backgroundScope work is skipped by advanceUntilIdle
+        runPast6s()
         assertEquals(0, p.offers)
     }
 
@@ -53,19 +64,42 @@ class PinOfferTest {
         p.offer.onBonding()
         advanceTimeBy(500); runCurrent()
         p.offer.onBonding()
-        advanceTimeBy(10_000); runCurrent()   // backgroundScope work is skipped by advanceUntilIdle
+        runPast6s()
         assertEquals(3, p.offers)
     }
 
-    @Test fun cancelledAttemptNeverReachesTheNextOne() = runTest {
-        val first = Probe(this)
-        first.offer.onBonding()
-        first.offer.cancel()
-        val second = Probe(this)
-        second.offer.onBonding()
-        advanceTimeBy(10_000); runCurrent()   // backgroundScope work is skipped by advanceUntilIdle
-        assertEquals(0, first.offers)
-        assertEquals(3, second.offers)
+    @Test fun bondingAfterCloseStartsNothing() = runTest {
+        val p = Probe(this)
+        p.offer.close()
+        p.offer.onBonding()
+        runPast6s()
+        assertEquals(0, p.offers)
+    }
+
+    @Test fun bondingAfterTheBatchFinishedStartsNoNewBatch() = runTest {
+        val p = Probe(this)
+        p.offer.onBonding()
+        runPast6s()
+        p.offer.onBonding()
+        runPast6s()
+        assertEquals(3, p.offers)
+    }
+
+    @Test fun closeBetweenReadinessAndDispatchStopsTheCall() = runTest {
+        val p = Probe(this)
+        p.beforeCheck = { p.gate.close() }     // the attempt ends while the offer is being checked
+        p.offer.onBonding()
+        runPast6s()
+        assertEquals(0, p.offers)
+    }
+
+    @Test fun closedGateRefusesRequestAnswers() {
+        val gate = AttemptGate()
+        assertEquals("ok", gate.runIfOpen { "ok" })
+        gate.close()
+        var called = false
+        assertNull(gate.runIfOpen { called = true })
+        assertFalse(called)
     }
 
     @Test fun pinAndKeyNeverPrinted() {
