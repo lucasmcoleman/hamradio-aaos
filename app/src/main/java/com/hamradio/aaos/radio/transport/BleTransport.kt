@@ -18,6 +18,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,7 +32,12 @@ import java.io.IOException
 import java.util.UUID
 
 private const val TAG = "BleTransport"
-private const val WRITE_ACK_TIMEOUT_MS = 2_000L
+// Android allows one GATT write in flight. A write that hasn't been acked keeps the stack
+// busy, so wait for the ack well past the first silence and retry "busy" starts instead of
+// dropping the message (the 10-23 truck test lost every command after one slow ack).
+private const val WRITE_ACK_TIMEOUT_MS = 6_000L
+private const val WRITE_BUSY_RETRY_MS = 6_000L
+private const val WRITE_BUSY_POLL_MS = 50L
 
 // Benshi BLE GATT UUIDs (same across all Benshi-family radios)
 private val SERVICE_UUID  = UUID.fromString("00001100-d102-11e1-9b23-00025b00a5a5")
@@ -59,6 +65,7 @@ class BleTransport(
     private inner class Session {
         var gatt: BluetoothGatt? = null
         var writeCharacteristic: BluetoothGattCharacteristic? = null
+        var writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
         val ready = CompletableDeferred<Unit>()
         val sendChannel = Channel<ByteArray>(64)
         val writeAcks = Channel<Int>(Channel.CONFLATED)
@@ -103,10 +110,14 @@ class BleTransport(
             if (status != BluetoothGatt.GATT_SUCCESS) return session.fail("BLE service discovery failed (status $status)")
             val service = gatt.getService(SERVICE_UUID)
                 ?: return session.fail("radio has no Benshi BLE service")
-            session.writeCharacteristic = service.getCharacteristic(WRITE_UUID)
-            if (service.getCharacteristic(INDICATE_UUID) == null || session.writeCharacteristic == null) {
+            val writeChar = service.getCharacteristic(WRITE_UUID)
+            if (service.getCharacteristic(INDICATE_UUID) == null || writeChar == null) {
                 return session.fail("radio BLE characteristics missing")
             }
+            session.writeCharacteristic = writeChar
+            session.writeType = writeTypeFor(writeChar.properties)
+            Log.i(TAG, "write characteristic props=0x%02X type=%d bond=%d".format(
+                writeChar.properties, session.writeType, gatt.device.bondState))
             // Negotiate larger MTU before enabling indications
             if (!gatt.requestMtu(512)) enableIndications(gatt, session)
         }
@@ -236,22 +247,63 @@ class BleTransport(
                 Log.w(TAG, "GATT or characteristic null, dropping message")
                 continue
             }
-            val started = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                g.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
-            } else {
-                @Suppress("DEPRECATION")
-                char.value = bytes
-                @Suppress("DEPRECATION")
-                g.writeCharacteristic(char)
+            while (session.writeAcks.tryReceive().isSuccess) Unit   // a late ack from an earlier write
+            val result = deliverWrite(
+                tryStart = { startWrite(g, char, bytes, session.writeType) },
+                awaitAck = { withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) { session.writeAcks.receive() } },
+            )
+            when (result) {
+                WriteResult.Acked -> Unit
+                WriteResult.NeverStarted -> Log.w(TAG, "BLE write could not start after ${WRITE_BUSY_RETRY_MS} ms, dropped (${bytes.toHexString()})")
+                is WriteResult.Failed -> Log.w(TAG, "BLE write failed or timed out (status ${result.status}) (${bytes.toHexString()})")
             }
-            if (!started) {
-                Log.w(TAG, "BLE write could not start (${bytes.toHexString()})")
-                continue
-            }
-            val status = withTimeoutOrNull(WRITE_ACK_TIMEOUT_MS) { session.writeAcks.receive() }
-            if (status != BluetoothGatt.GATT_SUCCESS) Log.w(TAG, "BLE write failed or timed out (status $status)")
         }
     }
+
+    private fun startWrite(g: BluetoothGatt, char: BluetoothGattCharacteristic, bytes: ByteArray, type: Int): Boolean =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            g.writeCharacteristic(char, bytes, type) == BluetoothGatt.GATT_SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            char.writeType = type
+            @Suppress("DEPRECATION")
+            char.value = bytes
+            @Suppress("DEPRECATION")
+            g.writeCharacteristic(char)
+        }
+}
+
+internal sealed class WriteResult {
+    object Acked : WriteResult()
+    object NeverStarted : WriteResult()
+    data class Failed(val status: Int?) : WriteResult()
+}
+
+/** Write with a response when the radio offers it, else without. */
+internal fun writeTypeFor(properties: Int): Int =
+    if (properties and BluetoothGattCharacteristic.PROPERTY_WRITE == 0 &&
+        properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE != 0
+    ) BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+    else BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+
+/**
+ * One GATT write: retry the start while the stack reports busy (an earlier write is still in
+ * flight), then wait for its ack. Status 0 is GATT_SUCCESS.
+ */
+internal suspend fun deliverWrite(
+    tryStart: () -> Boolean,
+    awaitAck: suspend () -> Int?,
+    busyRetryMs: Long = WRITE_BUSY_RETRY_MS,
+    pollMs: Long = WRITE_BUSY_POLL_MS,
+): WriteResult {
+    var waited = 0L
+    while (!tryStart()) {
+        if (waited >= busyRetryMs) return WriteResult.NeverStarted
+        delay(pollMs)
+        waited += pollMs
+    }
+    val status = awaitAck()
+    return if (status == 0) WriteResult.Acked else WriteResult.Failed(status)
 }
 
 private fun ByteArray.toHexString() = joinToString(" ") { "%02x".format(it) }

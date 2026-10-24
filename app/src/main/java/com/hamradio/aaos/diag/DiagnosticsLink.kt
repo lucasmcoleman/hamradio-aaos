@@ -168,6 +168,7 @@ object DiagnosticsLink {
                     DiagCommand.Bonded -> adapter.bondedDevices.joinToString("\n") { describeDevice(it) }
                         .ifEmpty { "no bonded devices" }
                     DiagCommand.Profiles -> profiles(context, adapter)
+                    DiagCommand.Scan -> scan(context, adapter, savedRadio(context))
                     is DiagCommand.Uuids -> uuids(context, adapter.getRemoteDevice(cmd.address))
                     is DiagCommand.Bond -> bond(context, adapter.getRemoteDevice(cmd.address))
                     is DiagCommand.Gatt -> gatt(context, adapter.getRemoteDevice(cmd.address))
@@ -277,6 +278,55 @@ object DiagnosticsLink {
                 })
             }
         } finally {
+            runCatching { context.unregisterReceiver(receiver) }
+        }
+    }
+
+    /**
+     * Classic discovery. The truck had never discovered the radio (type=unknown, no class),
+     * and Android can refuse classic sockets to a device it only knows from BLE. Reports the
+     * saved radio only; other devices are counted, not listed.
+     */
+    private suspend fun scan(context: Context, adapter: BluetoothAdapter, radio: String?): String {
+        val seen = mutableSetOf<String>()
+        val radioHits = mutableListOf<String>()
+        val finished = CompletableDeferred<Unit>()
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                when (intent.action) {
+                    BluetoothDevice.ACTION_FOUND -> {
+                        val d = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+                        synchronized(seen) {
+                            seen += d.address
+                            if (d.address.equals(radio, ignoreCase = true)) {
+                                val rssi = intent.getShortExtra(BluetoothDevice.EXTRA_RSSI, Short.MIN_VALUE)
+                                radioHits += "found: ${describeDevice(d)} rssi=$rssi"
+                            }
+                        }
+                    }
+                    BluetoothAdapter.ACTION_DISCOVERY_FINISHED -> finished.complete(Unit)
+                }
+            }
+        }
+        val filter = IntentFilter(BluetoothDevice.ACTION_FOUND).apply {
+            addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED)
+        }
+        register(context, receiver, filter)
+        return try {
+            adapter.cancelDiscovery()
+            val started = adapter.startDiscovery()
+            if (started) withTimeoutOrNull(12_000) { finished.await() }
+            synchronized(seen) {
+                buildString {
+                    appendLine("discovery started=$started, ${seen.size} device(s) answered")
+                    if (radio == null) appendLine("no radio saved in the app")
+                    else if (radioHits.isEmpty()) appendLine("saved radio $radio did not answer classic discovery")
+                    else radioHits.distinct().forEach { appendLine(it) }
+                    append("now: ${radio?.let { describeDevice(adapter.getRemoteDevice(it)) } ?: "-"}")
+                }
+            }
+        } finally {
+            runCatching { adapter.cancelDiscovery() }
             runCatching { context.unregisterReceiver(receiver) }
         }
     }

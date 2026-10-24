@@ -12,6 +12,7 @@ class DiagCommandTest {
 
     @Test fun parsesFixedCommands() {
         assertEquals(DiagCommand.Info, DiagCommand.parse(" info "))
+        assertEquals(DiagCommand.Scan, DiagCommand.parse("scan"))
         assertEquals(DiagCommand.Uuids(radio), DiagCommand.parse("uuids 38:d2:00:01:68:a8"))
         assertEquals(DiagCommand.Log(50), DiagCommand.parse("log 50"))
         assertEquals(DiagCommand.Prop("ro.build.fingerprint"), DiagCommand.parse("prop ro.build.fingerprint"))
@@ -28,7 +29,7 @@ class DiagCommandTest {
     @Test fun refusesAnythingElse() {
         listOf(
             "", "sh -c id", "prop ro.x;rm", "uuids notamac", "rfcomm $radio ch:99 secure",
-            "rfcomm $radio 1101 maybe", "rfcomm $radio 1101 secure 999999", "log 0", "bond $radio extra",
+            "rfcomm $radio 1101 maybe", "rfcomm $radio 1101 secure 999999", "log 0", "bond $radio extra", "scan 99",
         ).forEach { assertTrue(it, DiagCommand.parse(it) is DiagCommand.Invalid) }
     }
 

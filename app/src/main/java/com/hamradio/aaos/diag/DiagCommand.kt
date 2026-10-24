@@ -13,6 +13,7 @@ sealed class DiagCommand {
     object Bonded : DiagCommand()
     object Profiles : DiagCommand()
     object Off : DiagCommand()
+    object Scan : DiagCommand()
     data class Prop(val key: String) : DiagCommand()
     data class Uuids(val address: String) : DiagCommand()
     data class Bond(val address: String) : DiagCommand()
@@ -39,6 +40,7 @@ sealed class DiagCommand {
   info                         device, OS and permission summary
   prop <key>                   one system property (e.g. ro.build.fingerprint)
   bonded                       paired devices
+  scan                         classic discovery (12 s); reports whether the saved radio answered
   profiles                     Bluetooth profile states on this head unit
   uuids <addr>                 cached + fresh SDP service UUIDs of a device
   rfcomm <addr> <uuid|1101|ch:N> <secure|insecure> [readMs]
@@ -58,6 +60,7 @@ sealed class DiagCommand {
                 "bonded" -> Bonded
                 "profiles" -> Profiles
                 "off" -> Off
+                "scan" -> if (args.isEmpty()) Scan else Invalid("usage: scan")
                 "prop" -> args.singleOrNull()?.takeIf { PROP_KEY.matches(it) }?.let { Prop(it) }
                     ?: Invalid("usage: prop <key>")
                 "uuids" -> address(args)?.let { Uuids(it) } ?: Invalid("usage: uuids <addr>")
