@@ -10,6 +10,7 @@ Options: --no-cert (test that the truck refuses a client without the PC certific
 """
 import hashlib
 import os
+import re
 import socket
 import ssl
 import sys
@@ -62,8 +63,9 @@ def main():
                     w.flush()
                     text = read_block(f)
                     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"> {cmd}\n{text}\n")
-                    out.write(f"[{stamp}] > {cmd}\n{text}\n\n")
+                    shown = re.sub(r"pin:[0-9]+", "pin:****", cmd)   # never print or keep a PIN
+                    print(f"> {shown}\n{text}\n")
+                    out.write(f"[{stamp}] > {shown}\n{text}\n\n")
 
 
 if __name__ == "__main__":

@@ -14,8 +14,6 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.os.ParcelUuid
 import android.os.Process
 import android.util.Log
@@ -24,6 +22,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
+import java.lang.reflect.InvocationTargetException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.channels.Channel
@@ -174,7 +173,8 @@ object DiagnosticsLink {
                     is DiagCommand.Uuids -> uuids(context, adapter.getRemoteDevice(cmd.address))
                     is DiagCommand.Bond -> bond(context, adapter.getRemoteDevice(cmd.address), cmd.pin, cmd.transport)
                     is DiagCommand.PairWatch -> savedRadio(context)
-                        ?.let { pairWatch(context, it, cmd.seconds, cmd.pin) } ?: "refused: no radio saved in the app"
+                        ?.let { pairWatch(context, adapter.getRemoteDevice(it), cmd.seconds, cmd.pin) }
+                        ?: "refused: no radio saved in the app"
                     is DiagCommand.Gatt -> gatt(context, adapter.getRemoteDevice(cmd.address))
                     is DiagCommand.Rfcomm -> rfcomm(adapter, cmd)
                     else -> "unhandled"
@@ -348,11 +348,8 @@ object DiagnosticsLink {
         }
     }
 
-    private suspend fun bond(context: Context, device: BluetoothDevice, pin: String?, transport: String?): String {
-        val events = Channel<String>(Channel.UNLIMITED)
-        val receiver = pairingReceiver(device.address, pin, events)
-        register(context, receiver, pairingFilter())
-        return try {
+    private suspend fun bond(context: Context, device: BluetoothDevice, pin: String?, transport: String?): String =
+        pairingAttempt(context, device, pin) { events ->
             val before = device.bondState
             val (started, how) = startBond(device, transport)
             val log = mutableListOf("bondState before=$before createBond($how)=$started")
@@ -361,105 +358,107 @@ object DiagnosticsLink {
             }
             log += "bondState after=${device.bondState}"
             log.joinToString("\n")
-        } finally {
-            runCatching { context.unregisterReceiver(receiver) }
         }
-    }
 
     /** Pairing started from the radio's own menu; report (and for a PIN request, answer) it. */
-    private suspend fun pairWatch(context: Context, address: String, seconds: Int, pin: String?): String {
-        val events = Channel<String>(Channel.UNLIMITED)
-        val receiver = pairingReceiver(address, pin, events)
-        register(context, receiver, pairingFilter())
-        return try {
-            val log = mutableListOf("watching $seconds s for $address to ask to pair; press Pair on the radio now")
+    private suspend fun pairWatch(context: Context, device: BluetoothDevice, seconds: Int, pin: String?): String =
+        pairingAttempt(context, device, pin) { events ->
+            val log = mutableListOf("watching $seconds s for ${device.address} to ask to pair; press Pair on the radio now")
             withTimeoutOrNull(seconds * 1000L) { for (e in events) log += e } ?: log.add("no more events in $seconds s")
-            log += "bondState now=${(context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager)
-                .adapter.getRemoteDevice(address).bondState}"
+            log += "bondState now=${device.bondState}"
             log.joinToString("\n")
+        }
+
+    /**
+     * One pairing attempt: listens for [device]'s bond changes and pairing requests while [body]
+     * runs. Unprompted PIN offers live in this attempt's scope and stop when the bond settles or
+     * the attempt ends (codex #955).
+     */
+    private suspend fun pairingAttempt(
+        context: Context, device: BluetoothDevice, pin: String?,
+        body: suspend (Channel<String>) -> String,
+    ): String = coroutineScope {
+        val events = Channel<String>(Channel.UNLIMITED)
+        val offer = pin?.let {
+            PinOffer(
+                scope = this,
+                stillBonding = { runCatching { device.bondState == BluetoothDevice.BOND_BONDING }.getOrDefault(false) },
+                offer = { setPinResult(device, it) },
+                report = { events.trySend(it) },
+            )
+        }
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, intent: Intent) {
+                val d = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
+                if (d?.address?.uppercase() != device.address.uppercase()) return
+                if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
+                    events.trySend(answerPairingRequest(d, intent, pin))
+                    return
+                }
+                val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
+                val prev = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
+                val reason = intent.getIntExtra("android.bluetooth.device.extra.REASON", -1)
+                events.trySend("bond $prev -> $state (reason $reason)")
+                if (state == BluetoothDevice.BOND_BONDING) offer?.onBonding()
+                if (state == BluetoothDevice.BOND_BONDED || state == BluetoothDevice.BOND_NONE) {
+                    offer?.cancel()
+                    events.close()
+                }
+            }
+        }
+        val filter = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED).apply {
+            addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
+            priority = IntentFilter.SYSTEM_HIGH_PRIORITY - 1   // pairing requests are ordered broadcasts
+        }
+        register(context, receiver, filter)
+        try {
+            body(events)
         } finally {
+            offer?.cancel()
             runCatching { context.unregisterReceiver(receiver) }
         }
     }
 
-    private fun pairingFilter() = IntentFilter(BluetoothDevice.ACTION_BOND_STATE_CHANGED).apply {
-        addAction(BluetoothDevice.ACTION_PAIRING_REQUEST)
-        priority = IntentFilter.SYSTEM_HIGH_PRIORITY - 1   // pairing requests are ordered broadcasts
-    }
-
-    /** Bond state changes and pairing requests for [address]; closes [events] once bonding settles. */
-    private fun pairingReceiver(address: String, pin: String?, events: Channel<String>) = object : BroadcastReceiver() {
-        override fun onReceive(c: Context, intent: Intent) {
-            val d = intent.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE)
-            if (d?.address?.uppercase() != address.uppercase()) return
-            if (intent.action == BluetoothDevice.ACTION_PAIRING_REQUEST) {
-                events.trySend(answerPairingRequest(d, intent, pin))
-                return
-            }
-            val state = intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1)
-            val prev = intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
-            val reason = intent.getIntExtra("android.bluetooth.device.extra.REASON", -1)
-            events.trySend("bond $prev -> $state (reason $reason)")
-            if (state == BluetoothDevice.BOND_BONDING && pin != null) offerPinWhileBonding(d, pin, events)
-            if (state == BluetoothDevice.BOND_BONDED || state == BluetoothDevice.BOND_NONE) events.close()
-        }
-    }
+    private fun setPinResult(device: BluetoothDevice, pin: String): String =
+        runCatching { "setPin=${device.setPin(pin.toByteArray())}" }
+            .getOrElse { "setPin failed: ${it.javaClass.simpleName}" }
 
     /**
-     * ACTION_PAIRING_REQUEST may only reach privileged apps on newer Android, so also offer the
-     * PIN unprompted a few times while bonding; setPin only needs BLUETOOTH_CONNECT and is
-     * ignored when no PIN request is pending.
+     * createBond(transport) is hidden. Falls back to createBond() only when the method can't be
+     * found or accessed; a failure inside the call is reported, not retried another way.
      */
-    private fun offerPinWhileBonding(device: BluetoothDevice, pin: String, events: Channel<String>) {
-        val main = Handler(Looper.getMainLooper())
-        listOf(1_000L, 3_000L, 6_000L).forEach { at ->
-            main.postDelayed({
-                if (device.bondState != BluetoothDevice.BOND_BONDING) return@postDelayed
-                val r = runCatching { device.setPin(pin.toByteArray()).toString() }
-                    .getOrElse { "${it.javaClass.simpleName}: ${it.message}" }
-                events.trySend("unprompted setPin($pin) at ${at / 1000} s: $r")
-            }, at)
-        }
-    }
-
-    /** createBond(transport) is hidden; try it by reflection and say which path actually ran. */
     private fun startBond(device: BluetoothDevice, transport: String?): Pair<Boolean, String> {
         val code = when (transport) {
             "bredr" -> BluetoothDevice.TRANSPORT_BREDR
             "le" -> BluetoothDevice.TRANSPORT_LE
             else -> return device.createBond() to "auto"
         }
-        return runCatching {
-            val m = BluetoothDevice::class.java.getMethod("createBond", Int::class.javaPrimitiveType)
-            (m.invoke(device, code) as Boolean) to transport
-        }.getOrElse { device.createBond() to "auto; $transport not available: ${it.javaClass.simpleName}" }
+        val method = try {
+            BluetoothDevice::class.java.getMethod("createBond", Int::class.javaPrimitiveType)
+        } catch (e: ReflectiveOperationException) {
+            return device.createBond() to "auto; $transport not available: ${e.javaClass.simpleName}"
+        }
+        return try {
+            (method.invoke(device, code) as Boolean) to transport
+        } catch (e: InvocationTargetException) {
+            false to "$transport failed: ${e.cause?.javaClass?.simpleName}: ${e.cause?.message}"
+        } catch (e: IllegalAccessException) {
+            device.createBond() to "auto; $transport not accessible"
+        }
     }
 
-    /** Names the pairing variant and answers a PIN request; confirming a passkey needs a privileged app. */
+    /** Reports the pairing variant and answers a PIN request; confirming a passkey needs a privileged app. */
     private fun answerPairingRequest(device: BluetoothDevice, intent: Intent, pin: String?): String {
         val variant = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_VARIANT, -1)
-        val key = intent.getIntExtra(BluetoothDevice.EXTRA_PAIRING_KEY, -1)
-        val name = when (variant) {
-            BluetoothDevice.PAIRING_VARIANT_PIN -> "PIN"
-            1 -> "passkey entry"
-            BluetoothDevice.PAIRING_VARIANT_PASSKEY_CONFIRMATION -> "passkey confirmation"
-            3 -> "consent"
-            4 -> "display passkey"
-            5 -> "display PIN"
-            6 -> "OOB consent"
-            7 -> "16-digit PIN"
-            else -> "unknown"
-        }
+        val hasKey = intent.hasExtra(BluetoothDevice.EXTRA_PAIRING_KEY)
         val action = when {
-            (variant == BluetoothDevice.PAIRING_VARIANT_PIN || variant == 7) && pin != null ->
-                runCatching { "setPin($pin)=${device.setPin(pin.toByteArray())}" }
-                    .getOrElse { "setPin failed: ${it.javaClass.simpleName}: ${it.message}" }
+            (variant == BluetoothDevice.PAIRING_VARIANT_PIN || variant == 7) && pin != null -> setPinResult(device, pin)
             variant == BluetoothDevice.PAIRING_VARIANT_PASSKEY_CONFIRMATION || variant == 3 ->
                 runCatching { "setPairingConfirmation=${device.setPairingConfirmation(true)}" }
                     .getOrElse { "setPairingConfirmation failed: ${it.javaClass.simpleName}" }
             else -> "not answered"
         }
-        return "pairing request: variant=$variant ($name) key=$key; $action"
+        return pairingRequestText(variant, hasKey, action)
     }
 
     private suspend fun gatt(context: Context, device: BluetoothDevice): String {
