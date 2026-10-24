@@ -292,7 +292,8 @@ object DiagnosticsLink {
         // us, and the watch ignores a FINISHED that isn't preceded by our own STARTED (codex #947).
         if (adapter.isDiscovering) {
             adapter.cancelDiscovery()
-            withTimeoutOrNull(5_000) { while (adapter.isDiscovering) delay(100) }
+            val settled = withTimeoutOrNull(5_000) { while (adapter.isDiscovering) delay(100) } != null
+            if (!settled) return "inconclusive: an earlier discovery did not stop within 5 s; scan not run"
             delay(300)
         }
         val seen = mutableSetOf<String>()
@@ -325,11 +326,14 @@ object DiagnosticsLink {
             watch.arm()
             val started = adapter.startDiscovery()
             if (started) withTimeoutOrNull(12_000) { watch.finished.await() }
+            val outcome = scanOutcome(started, watch.sawStarted, watch.finished.isCompleted)
             synchronized(seen) {
                 buildString {
-                    appendLine("discovery started=$started, ${seen.size} device(s) answered")
+                    appendLine("discovery $outcome; ${seen.size} device(s) answered")
                     if (radio == null) appendLine("no radio saved in the app")
-                    else if (radioHits.isEmpty()) appendLine("saved radio $radio did not answer classic discovery")
+                    else if (radioHits.isEmpty()) appendLine(
+                        if (outcome == SCAN_COMPLETE) "saved radio $radio did not answer classic discovery"
+                        else "saved radio $radio not seen (inconclusive: discovery did not run to completion)")
                     else radioHits.distinct().forEach { appendLine(it) }
                     append("now: ${radio?.let { describeDevice(adapter.getRemoteDevice(it)) } ?: "-"}")
                 }

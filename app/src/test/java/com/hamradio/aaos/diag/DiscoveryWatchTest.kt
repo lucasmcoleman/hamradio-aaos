@@ -1,5 +1,6 @@
 package com.hamradio.aaos.diag
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,6 +15,13 @@ class DiscoveryWatchTest {
         watch.onStarted()
         watch.onFinished()
         assertTrue(watch.finished.isCompleted)
+    }
+
+    @Test fun onlyAFullRunIsConclusive() {
+        assertEquals(SCAN_COMPLETE, scanOutcome(requested = true, sawStarted = true, finished = true))
+        listOf(
+            scanOutcome(false, false, false), scanOutcome(true, false, false), scanOutcome(true, true, false),
+        ).forEach { assertTrue(it, it.startsWith("inconclusive")) }
     }
 
     @Test fun startedBeforeArmDoesNotCount() {
