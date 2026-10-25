@@ -280,7 +280,7 @@ private fun DiagnosticsLinkCard() {
                 )
                 Fingerprint(s.fingerprint)
                 Text(
-                    if (s.clientConnected) "Claude's PC is running tests" else "Waiting for the PC. Turns off after 30 min.",
+                    if (s.clientConnected) "PC connection open" else "Waiting for the PC. Turns off after 30 min.",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (s.clientConnected) RxGreen else OnSurfaceMuted,
                 )

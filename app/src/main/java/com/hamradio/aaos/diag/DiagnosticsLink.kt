@@ -45,7 +45,8 @@ private const val AUTO_OFF_MS = 30 * 60_000L
  * LAN (the truck drops inbound connections) and runs TLS in server mode over that socket,
  * completing a handshake only with Lucas's PC (pinned client certificate, see [DiagTls]), then runs
  * the fixed [DiagCommand] set against the radio saved in the app. No on-screen Allow: Lucas asked
- * for unattended sessions (#16027), so the pinned certificate is the only gate. One client at a
+ * for unattended sessions (#16027), so the pinned client certificate (whoever holds its
+ * private key) is the only gate. One client at a
  * time; turns itself off after 30 minutes.
  * Session lifecycle and limits live in [DiagServer] (codex review #941).
  */
@@ -85,7 +86,7 @@ object DiagnosticsLink {
             server = DiagServer(
                 source = source,
                 peerFilter = { true },   // we chose the relay; the pinned client cert is the check
-                approve = { true },   // the TLS handshake already proved it is Lucas's PC
+                approve = { true },   // the TLS handshake already proved the peer holds the pinned client key
                 execute = { cmd -> run(app, cmd) },
                 banner = "hamradio diagnostics link (${Build.MODEL}). type help.",
                 autoOffMs = AUTO_OFF_MS,

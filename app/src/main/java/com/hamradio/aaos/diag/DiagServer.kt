@@ -25,8 +25,9 @@ import java.net.SocketTimeoutException
  * so an old session's cleanup, timer or clients can never touch a newer one.
  *
  * - [handshake] authenticates the peer (TLS client certificate) before anything else.
- * - Every connection must then be approved on the head unit ([approve]); nothing is
- *   sent before that, and the single client slot stays held while the prompt is up.
+ * - [approve] then decides whether the session may proceed; nothing is sent before that,
+ *   and the single client slot stays held meanwhile. The app passes `{ true }` since
+ *   Lucas dropped the on-screen Allow (#16027); tests still exercise the hook.
  * - One client at a time; any other connection is closed at once, unread and unwritten.
  * - Lines are capped at [maxLine] bytes; idle clients are dropped after [idleTimeoutMs].
  * - Commands run one at a time.
@@ -134,8 +135,8 @@ class DiagServer(
     }
 
     /**
-     * Waits for the on-screen answer while watching the connection: if the client hangs up
-     * (or sends anything before approval) the prompt is withdrawn and the answer is no.
+     * Waits for [approve] while watching the connection: if the client hangs up (or sends
+     * anything before approval) the answer is no.
      */
     private suspend fun awaitApproval(sock: Socket): Boolean = coroutineScope {
         val decision = async { withTimeoutOrNull(approveTimeoutMs) { approve(sock.inetAddress) } ?: false }
