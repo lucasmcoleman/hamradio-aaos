@@ -53,7 +53,7 @@ def main():
             got = hashlib.sha256(s.getpeercert(binary_form=True)).hexdigest()
             if got != pin:
                 sys.exit(f"truck certificate {got} does not match the pinned fingerprint; nothing sent")
-            print(f"TLS {s.version()}, truck key pinned. Tap Allow on the head unit...")
+            print(f"TLS {s.version()}, truck key pinned. waiting for the truck...")
             f = s.makefile("r", encoding="utf-8", newline="\n")
             w = s.makefile("w", encoding="utf-8", newline="\n")
             print(read_block(f))

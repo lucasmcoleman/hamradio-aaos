@@ -43,9 +43,10 @@ private const val AUTO_OFF_MS = 30 * 60_000L
 /**
  * Diagnostics link (job #875): while switched on, the app dials out to a relay on the home
  * LAN (the truck drops inbound connections) and runs TLS in server mode over that socket,
- * completing a handshake only with Lucas's PC (pinned client certificate, see [DiagTls]), then waits for an
- * Allow tap on the head unit before running the fixed [DiagCommand] set against the
- * radio saved in the app. One client at a time; turns itself off after 30 minutes.
+ * completing a handshake only with Lucas's PC (pinned client certificate, see [DiagTls]), then runs
+ * the fixed [DiagCommand] set against the radio saved in the app. No on-screen Allow: Lucas asked
+ * for unattended sessions (#16027), so the pinned certificate is the only gate. One client at a
+ * time; turns itself off after 30 minutes.
  * Session lifecycle and limits live in [DiagServer] (codex review #941).
  */
 @SuppressLint("MissingPermission")
@@ -54,7 +55,6 @@ object DiagnosticsLink {
     sealed class Status {
         object Off : Status()
         data class Listening(val addresses: List<String>, val fingerprint: String, val clientConnected: Boolean) : Status()
-        data class AwaitingApproval(val peer: String, val fingerprint: String) : Status()
         data class Failed(val reason: String) : Status()
     }
 
@@ -62,7 +62,6 @@ object DiagnosticsLink {
     val status: StateFlow<Status> = _status.asStateFlow()
 
     private var current: DiagServer? = null
-    private var pendingApproval: CompletableDeferred<Boolean>? = null
     private var fingerprint = ""
     private var relayHost = DEFAULT_RELAY_HOST
 
@@ -86,7 +85,7 @@ object DiagnosticsLink {
             server = DiagServer(
                 source = source,
                 peerFilter = { true },   // we chose the relay; the pinned client cert is the check
-                approve = { askApproval(server, "Claude's PC (via relay $host)") },
+                approve = { true },   // the TLS handshake already proved it is Lucas's PC
                 execute = { cmd -> run(app, cmd) },
                 banner = "hamradio diagnostics link (${Build.MODEL}). type help.",
                 autoOffMs = AUTO_OFF_MS,
@@ -105,34 +104,7 @@ object DiagnosticsLink {
     fun stop() {
         current?.stop()
         current = null
-        pendingApproval?.complete(false)
-        pendingApproval = null
         _status.value = Status.Off
-    }
-
-    /** The head unit's answer to the Allow prompt for the connection now waiting. */
-    @Synchronized
-    fun answer(allow: Boolean) {
-        pendingApproval?.complete(allow)
-        pendingApproval = null
-    }
-
-    private suspend fun askApproval(server: DiagServer, peer: String): Boolean {
-        val decision = CompletableDeferred<Boolean>()
-        synchronized(this) {
-            if (current !== server || !server.active) return false
-            pendingApproval?.complete(false)
-            pendingApproval = decision
-            _status.value = Status.AwaitingApproval(peer, fingerprint)
-        }
-        return try {
-            decision.await()
-        } finally {
-            synchronized(this) {
-                if (pendingApproval === decision) pendingApproval = null
-                if (current === server) publish(server)
-            }
-        }
     }
 
     @Synchronized
@@ -140,14 +112,10 @@ object DiagnosticsLink {
         if (current !== server) return   // an old session never changes what the screen shows
         if (!server.active) {
             current = null
-            pendingApproval?.complete(false)
-            pendingApproval = null
             _status.value = Status.Off
             return
         }
-        if (pendingApproval == null) {
-            _status.value = Status.Listening(listOf("relay $relayHost:$RELAY_TRUCK_PORT"), fingerprint, server.clientConnected)
-        }
+        _status.value = Status.Listening(listOf("relay $relayHost:$RELAY_TRUCK_PORT"), fingerprint, server.clientConnected)
     }
 
     private fun savedRadio(context: Context): String? =

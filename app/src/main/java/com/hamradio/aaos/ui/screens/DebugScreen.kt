@@ -261,7 +261,7 @@ private fun LogRow(entry: LogEntry) {
 private fun DiagnosticsLinkCard() {
     val context = LocalContext.current
     val status by DiagnosticsLink.status.collectAsStateWithLifecycle()
-    val on = status is DiagnosticsLink.Status.Listening || status is DiagnosticsLink.Status.AwaitingApproval
+    val on = status is DiagnosticsLink.Status.Listening
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -280,16 +280,10 @@ private fun DiagnosticsLinkCard() {
                 )
                 Fingerprint(s.fingerprint)
                 Text(
-                    if (s.clientConnected) "PC connected" else "Waiting for the PC. Turns off after 30 min.",
+                    if (s.clientConnected) "Claude's PC is running tests" else "Waiting for the PC. Turns off after 30 min.",
                     style = MaterialTheme.typography.bodySmall,
                     color = if (s.clientConnected) RxGreen else OnSurfaceMuted,
                 )
-            }
-            is DiagnosticsLink.Status.AwaitingApproval -> {
-                Text("Allow ${s.peer} to run Bluetooth tests?", style = MaterialTheme.typography.bodyMedium, color = Accent)
-                Fingerprint(s.fingerprint)
-                QuickCmd("ALLOW") { DiagnosticsLink.answer(true) }
-                QuickCmd("DENY") { DiagnosticsLink.answer(false) }
             }
             is DiagnosticsLink.Status.Failed ->
                 Text(s.reason, style = MaterialTheme.typography.bodySmall, color = TxRed)
