@@ -950,6 +950,7 @@ private fun ConnectionSheet(
     val isMock by vm.mockMode.collectAsStateWithLifecycle()
     val lastError by vm.lastConnectError.collectAsStateWithLifecycle()
     val controlOnly by vm.controlOnly.collectAsStateWithLifecycle()
+    val bridgeMode by vm.bridgeMode.collectAsStateWithLifecycle()
     var addressText by remember { mutableStateOf("") }
 
     ModalBottomSheet(
@@ -1001,6 +1002,7 @@ private fun ConnectionSheet(
                 Text(
                     text  = when {
                         isMock      -> "MOCK"
+                        bridgeMode  -> "BRIDGE"
                         controlOnly -> "BLE"
                         else        -> "BT"
                     },
@@ -1152,6 +1154,32 @@ private fun ConnectionSheet(
 
                 HorizontalDivider(color = Outline.copy(alpha = 0.3f))
 
+                // ESP32 bridge: the head unit reaches the radio over Wi-Fi when it can't pair (GM)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("ESP32 Bridge", style = MaterialTheme.typography.bodyLarge)
+                        Text(
+                            "Connect through the ESP32 on the truck's Wi-Fi",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = OnSurfaceMuted,
+                        )
+                    }
+                    Switch(
+                        checked = bridgeMode,
+                        onCheckedChange = { vm.setBridgeMode(it) },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Accent,
+                            checkedTrackColor = Accent.copy(0.4f),
+                        ),
+                    )
+                }
+
+                HorizontalDivider(color = Outline.copy(alpha = 0.3f))
+
                 // Manual MAC fallback
                 Text("Manual Address", style = MaterialTheme.typography.labelLarge, color = OnSurfaceMuted)
                 Row(
@@ -1161,7 +1189,7 @@ private fun ConnectionSheet(
                     OutlinedTextField(
                         value = addressText,
                         onValueChange = { addressText = it.uppercase() },
-                        placeholder = { Text("AA:BB:CC:DD:EE:FF or BRIDGE: (ESP32 bridge)", color = OnSurfaceMuted) },
+                        placeholder = { Text("AA:BB:CC:DD:EE:FF", color = OnSurfaceMuted) },
                         singleLine = true,
                         leadingIcon = { Icon(Icons.Default.Bluetooth, null, tint = OnSurfaceMuted) },
                         modifier = Modifier.weight(1f),

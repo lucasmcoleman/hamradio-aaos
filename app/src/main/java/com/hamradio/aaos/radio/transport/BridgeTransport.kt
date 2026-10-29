@@ -26,6 +26,9 @@ import java.net.SocketTimeoutException
 
 private const val TAG = "BridgeTransport"
 const val BRIDGE_PREFIX = "bridge:"
+
+/** True for any ESP32 bridge address ("BRIDGE:", "BRIDGE:AUTO", "BRIDGE:host[:port]"). */
+fun isBridgeAddress(address: String?): Boolean = address?.startsWith(BRIDGE_PREFIX, ignoreCase = true) == true
 const val BRIDGE_CONTROL_PORT = 8701
 private const val CONNECT_TIMEOUT_MS = 10_000
 private const val IDLE_PING_MS = 10_000

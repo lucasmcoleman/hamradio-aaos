@@ -4,7 +4,7 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import com.hamradio.aaos.radio.transport.BRIDGE_PREFIX
+import com.hamradio.aaos.radio.transport.isBridgeAddress
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -32,6 +32,11 @@ class RadioPrefs @Inject constructor(
             if (v == null) prefs.edit().remove(KEY_ADDR).apply()
             else prefs.edit().putString(KEY_ADDR, v).apply()
         }
+
+    /** The radio's own MAC, kept while the bridge is selected so turning the bridge off goes back to it. */
+    var lastRadioAddress: String?
+        get() = prefs.getString(KEY_LAST_RADIO_ADDR, null)
+        set(v) = prefs.edit().putString(KEY_LAST_RADIO_ADDR, v).apply()
 
     /** RX audio routing: 0=Radio, 1=Vehicle, 2=Both */
     var rxAudioRoute: Int
@@ -61,10 +66,11 @@ class RadioPrefs @Inject constructor(
     companion object {
         /** A radio MAC, or an ESP32 bridge address ("BRIDGE:", "BRIDGE:AUTO", "BRIDGE:host[:port]"). */
         internal fun isAcceptedDeviceAddress(v: String): Boolean =
-            v.startsWith(BRIDGE_PREFIX, ignoreCase = true) || BluetoothAdapter.checkBluetoothAddress(v)
+            isBridgeAddress(v) || BluetoothAdapter.checkBluetoothAddress(v)
 
         private const val KEY_MOCK = "use_mock_radio"
         private const val KEY_ADDR = "device_address"
+        private const val KEY_LAST_RADIO_ADDR = "last_radio_address"
         private const val KEY_RX_ROUTE = "rx_audio_route"
         private const val KEY_TX_ROUTE = "tx_mic_route"
         private const val KEY_DEBUG_TAB = "show_debug_tab"

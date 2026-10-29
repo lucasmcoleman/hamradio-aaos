@@ -6,6 +6,8 @@ import com.hamradio.aaos.di.RadioPrefs
 import com.hamradio.aaos.radio.LogEntry
 import com.hamradio.aaos.radio.RadioController
 import com.hamradio.aaos.radio.SmartBeacon
+import com.hamradio.aaos.radio.transport.BRIDGE_PREFIX
+import com.hamradio.aaos.radio.transport.isBridgeAddress
 import com.hamradio.aaos.radio.SmartBeaconConfig
 import com.hamradio.aaos.radio.protocol.BenshiMessage
 import com.hamradio.aaos.radio.protocol.BssSettings
@@ -342,10 +344,32 @@ class MainViewModel @Inject constructor(
 
     /** Save the device address and connect to it now. */
     fun connectToDevice(address: String) {
+        val previous = prefs.deviceAddress
+        if (isBridgeAddress(address) && previous != null && !isBridgeAddress(previous)) prefs.lastRadioAddress = previous
         prefs.deviceAddress = address
         prefs.useMockRadio = false
         _isMockMode.value = false
+        _bridgeMode.value = isBridgeAddress(prefs.deviceAddress)
         switchTransport()
+    }
+
+    private val _bridgeMode = MutableStateFlow(isBridgeAddress(prefs.deviceAddress))
+    /** True while the app connects through the ESP32 bridge instead of the radio's own Bluetooth. */
+    val bridgeMode: StateFlow<Boolean> = _bridgeMode.asStateFlow()
+
+    /** Bridge on: find the ESP32 on the network. Off: back to the radio's last Bluetooth address. */
+    fun setBridgeMode(enabled: Boolean) {
+        if (enabled) {
+            connectToDevice(BRIDGE_PREFIX.uppercase())
+            return
+        }
+        val radio = prefs.lastRadioAddress
+        if (radio != null) connectToDevice(radio)
+        else {
+            prefs.deviceAddress = null
+            _bridgeMode.value = false
+            switchTransport()
+        }
     }
 
     /** The controller stops the old session (PTT, audio, reconnect) before starting the new one. */
