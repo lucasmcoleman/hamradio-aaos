@@ -10,7 +10,8 @@
 //   status | scan | connect | disconnect | mac AA:BB:CC:DD:EE:FF
 //   scn <ctl> <audio>        pick RFCOMM channels (0 = auto from discovery)
 //   wifi <ssid> <password>   join a network (stored, never printed)
-//   ap                       forget the network and run as access point
+//   wifi2 <ssid> <password>  a second network (truck hotspot); "wifi2 -" forgets it
+//   ap                       forget both networks and run as access point
 //   tx <hex>                 send bytes on the control channel; replies print as "rx ctl <hex>"
 //   otapass                  show the password for Wi-Fi firmware updates
 //
@@ -23,6 +24,7 @@
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <WiFiMulti.h>
 #include <esp_bt.h>
 #include <esp_bt_main.h>
 #include <esp_bt_device.h>
@@ -329,14 +331,24 @@ static void txFailsafe() {
   txPrevByte = 0;
 }
 
+// Up to two saved networks (home and the truck hotspot); WiFiMulti joins whichever is in range
+// and the loop rescans after a drop, so the board follows the truck in and out of the driveway.
+WiFiMulti *wifiMulti = nullptr;
+uint32_t lastWifiTry = 0;
+
 static void startWifi() {
-  String ssid = prefs.getString("ssid", "");
+  String ssid = prefs.getString("ssid", ""), ssid2 = prefs.getString("ssid2", "");
   WiFi.mode(WIFI_MODE_NULL);
-  if (ssid.length()) {
+  delete wifiMulti;
+  wifiMulti = nullptr;
+  if (ssid.length() || ssid2.length()) {
     WiFi.mode(WIFI_STA);
     WiFi.setHostname("hamradio-bridge");
-    WiFi.begin(ssid.c_str(), prefs.getString("pass", "").c_str());
-    out.printf("wifi joining \"%s\"\n", ssid.c_str());
+    wifiMulti = new WiFiMulti();
+    if (ssid.length()) wifiMulti->addAP(ssid.c_str(), prefs.getString("pass", "").c_str());
+    if (ssid2.length()) wifiMulti->addAP(ssid2.c_str(), prefs.getString("pass2", "").c_str());
+    out.printf("wifi joining \"%s\"%s%s%s\n", ssid.c_str(), ssid2.length() ? " or \"" : "", ssid2.c_str(), ssid2.length() ? "\"" : "");
+    lastWifiTry = 0;  // the loop tries right away
   } else {
     WiFi.mode(WIFI_AP);
     String appass = prefs.getString("appass", "");
@@ -356,7 +368,9 @@ static void status() {
   out.printf("radio %s  ctl %s  aud %s\n", radioMac.c_str(), handle[CTL] ? "open" : "closed", handle[AUD] ? "open" : "closed");
   out.printf("scn wanted ctl %d aud %d; discovered %d services\n", wantScn[CTL], wantScn[AUD], foundCount);
   if (WiFi.getMode() == WIFI_STA)
-    out.printf("wifi sta %s  ip %s\n", WiFi.isConnected() ? "connected" : "not connected", WiFi.localIP().toString().c_str());
+    out.printf("wifi sta %s \"%s\"  ip %s  (saved: \"%s\", \"%s\")\n", WiFi.isConnected() ? "connected" : "not connected",
+               WiFi.SSID().c_str(), WiFi.localIP().toString().c_str(), prefs.getString("ssid", "").c_str(),
+               prefs.getString("ssid2", "").c_str());
   else
     out.printf("wifi ap %s  ip %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
   for (int c = 0; c < 2; c++) out.printf("tcp %u %s\n", PORTS[c], client[c] && client[c].connected() ? "client connected" : "idle");
@@ -444,7 +458,16 @@ static void command(String line, bool remote = false) {
     out.println("wifi saved; restarting wifi");
     startWifi();
   }
-  else if (cmd == "ap") { prefs.remove("ssid"); prefs.remove("pass"); startWifi(); }
+  else if (cmd == "wifi2") {  // second network, e.g. the truck hotspot; "wifi2 -" forgets it
+    if (arg == "-") { prefs.remove("ssid2"); prefs.remove("pass2"); out.println("wifi2 forgotten"); startWifi(); return; }
+    int s2 = arg.indexOf(' ');
+    if (s2 < 0) { out.println("usage: wifi2 <ssid> <password>  |  wifi2 -"); return; }
+    prefs.putString("ssid2", arg.substring(0, s2));
+    prefs.putString("pass2", arg.substring(s2 + 1));
+    out.println("wifi2 saved; restarting wifi");
+    startWifi();
+  }
+  else if (cmd == "ap") { prefs.remove("ssid"); prefs.remove("pass"); prefs.remove("ssid2"); prefs.remove("pass2"); startWifi(); }
   else if (cmd == "appass") out.printf("ap password %s\n", prefs.getString("appass", "").c_str());
   else if (cmd == "otapass") Serial.printf("ota password %s\n", otaPass().c_str());  // USB only, never to the log ring
   else if (cmd == "echo") { echoCtl = arg != "off"; out.printf("echo %s\n", echoCtl ? "on" : "off"); }
@@ -477,7 +500,7 @@ static void command(String line, bool remote = false) {
     for (size_t i = 0; i + 1 < arg.length() && n < sizeof(buf); i += 2) buf[n++] = strtoul(arg.substring(i, i + 2).c_str(), nullptr, 16);
     out.println(sendToRadio(CTL, buf, n) ? "tx ok" : "tx FAILED: control channel not open");
   }
-  else out.println("commands: status scan connect disconnect mac scn wifi ap appass otapass echo tx sec iocap pin unbond reboot");
+  else out.println("commands: status scan connect disconnect mac scn wifi wifi2 ap appass otapass echo tx sec iocap pin unbond reboot");
 }
 
 void setup() {
@@ -656,5 +679,10 @@ void loop() {
     }
   }
   txFailsafe();
+  if (wifiMulti && !WiFi.isConnected() && (lastWifiTry == 0 || millis() - lastWifiTry > 10000)) {
+    lastWifiTry = millis();  // rescan for either saved network after a drop
+    if (wifiMulti->run(4000) == WL_CONNECTED)
+      out.printf("wifi connected \"%s\" ip %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
+  }
   delay(1);
 }
