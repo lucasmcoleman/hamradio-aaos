@@ -4,6 +4,7 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
+import com.hamradio.aaos.radio.transport.BRIDGE_PREFIX
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -24,8 +25,8 @@ class RadioPrefs @Inject constructor(
     var deviceAddress: String?
         get() = prefs.getString(KEY_ADDR, null)
         set(v) {
-            if (v != null && !BluetoothAdapter.checkBluetoothAddress(v)) {
-                Log.w(TAG, "Invalid MAC address rejected: $v")
+            if (v != null && !isAcceptedDeviceAddress(v)) {
+                Log.w(TAG, "Invalid device address rejected: $v")
                 return
             }
             if (v == null) prefs.edit().remove(KEY_ADDR).apply()
@@ -58,6 +59,10 @@ class RadioPrefs @Inject constructor(
         set(v) = prefs.edit().putBoolean(KEY_PTT_TOGGLE, v).apply()
 
     companion object {
+        /** A radio MAC, or an ESP32 bridge address ("BRIDGE:", "BRIDGE:AUTO", "BRIDGE:host[:port]"). */
+        internal fun isAcceptedDeviceAddress(v: String): Boolean =
+            v.startsWith(BRIDGE_PREFIX, ignoreCase = true) || BluetoothAdapter.checkBluetoothAddress(v)
+
         private const val KEY_MOCK = "use_mock_radio"
         private const val KEY_ADDR = "device_address"
         private const val KEY_RX_ROUTE = "rx_audio_route"
