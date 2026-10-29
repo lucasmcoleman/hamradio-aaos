@@ -297,6 +297,38 @@ static bool sendToRadio(int c, const uint8_t *d, size_t n) {
   return esp_spp_write(handle[c], n, (uint8_t *)d) == ESP_OK;
 }
 
+// Transmit failsafe. The radio keys while it receives audio frames on its audio channel and
+// unkeys on END_AUDIO. If the app's link drops mid-transmit, that END_AUDIO never arrives, so
+// the bridge watches what it forwards: a cmd-0 frame opens a transmit, a cmd-1 frame (END_AUDIO)
+// closes it. Frames are escaped, so 0x7E is only ever a delimiter.
+static const uint8_t END_AUDIO[] = {0x7E, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E};
+static const uint32_t TX_SILENCE_MS = 1000;  // the app streams frames continuously while keyed
+bool txOpen = false;
+uint32_t txLastData = 0;
+uint8_t txPrevByte = 0;
+
+static void trackTx(const uint8_t *d, size_t n) {
+  for (size_t i = 0; i < n; i++) {
+    if (txPrevByte == 0x7E && d[i] != 0x7E) {  // first byte after an opening delimiter is the cmd
+      if (d[i] == 0x00 && !txOpen) { txOpen = true; out.println("tx started by app"); }
+      else if (d[i] == 0x01 && txOpen) { txOpen = false; out.println("tx ended by app"); }
+    }
+    txPrevByte = d[i];
+  }
+  txLastData = millis();
+}
+
+static void txFailsafe() {
+  if (!txOpen) return;
+  bool gone = !client[AUD] || !client[AUD].connected();
+  if (!gone && millis() - txLastData < TX_SILENCE_MS) return;
+  bool sent = sendToRadio(AUD, END_AUDIO, sizeof(END_AUDIO));
+  out.printf("tx FAILSAFE: app %s mid-transmit; END_AUDIO %s\n", gone ? "disconnected" : "went silent",
+             sent ? "sent to radio" : "NOT sent (audio channel closed)");
+  txOpen = false;
+  txPrevByte = 0;
+}
+
 static void startWifi() {
   String ssid = prefs.getString("ssid", "");
   WiFi.mode(WIFI_MODE_NULL);
@@ -618,8 +650,11 @@ void loop() {
     }
     while (client[c] && client[c].connected() && client[c].available()) {
       n = client[c].read(buf, sizeof(buf));
-      if (n > 0 && !sendToRadio(c, buf, n)) break;
+      if (n <= 0) break;
+      if (c == AUD) trackTx(buf, n);
+      if (!sendToRadio(c, buf, n)) break;
     }
   }
+  txFailsafe();
   delay(1);
 }
