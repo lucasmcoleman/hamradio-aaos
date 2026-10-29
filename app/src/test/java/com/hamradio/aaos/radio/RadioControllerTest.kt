@@ -43,12 +43,37 @@ class RadioControllerTest {
         }
     }
 
-    @Test fun bridgeTransportGetsReceiveOnlyBridgeAudio() = runTest {
+    @Test fun bridgeTransportGetsBridgeAudio() = runTest {
         val audio = selectRadioAudio(context, BridgeTransport("bridge:127.0.0.1", backgroundScope))
         try {
             assertTrue(audio is com.hamradio.aaos.radio.audio.BridgeAudioChannel)
-            assertFalse(audio!!.startTransmit())
+            assertFalse("not connected: no transmit", audio!!.startTransmit())
         } finally { audio?.close() }
+    }
+
+    @Test fun pttOverBridgeAudioStartsAndStopsTransmit() = runTest {
+        val connected = MutableStateFlow(false)
+        val transmitting = MutableStateFlow(false)
+        val audio = mockk<com.hamradio.aaos.radio.audio.BridgeAudioChannel>()
+        every { audio.isConnected } returns connected
+        every { audio.isTransmitting } returns transmitting
+        coEvery { audio.connect() } answers { connected.value = true }
+        coEvery { audio.disconnect() } answers { transmitting.value = false; connected.value = false }
+        coEvery { audio.close() } answers { transmitting.value = false; connected.value = false }
+        coEvery { audio.startTransmit() } answers { transmitting.value = true; true }
+        coEvery { audio.stopTransmit() } answers { transmitting.value = false }
+        val focus = FakeFocus()
+        val controller = RadioController(FakeTransport(), factory, context, backgroundScope, focus) { audio }
+        controller.connect(); runCurrent(); advanceTimeBy(1001); runCurrent()
+        controller.pttDown(); runCurrent()
+        coVerify(exactly = 1) { audio.startTransmit() }
+        assertTrue(controller.isPttActive.value)
+        assertTrue(focus.held)
+        controller.pttUp(); runCurrent()
+        coVerify { audio.stopTransmit() }
+        assertFalse(controller.isPttActive.value)
+        assertFalse(focus.held)
+        controller.disconnect(); runCurrent()
     }
 
     private class FakeTransport(val pending: Boolean = false) : IRadioTransport {

@@ -4,27 +4,20 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
-import android.media.AudioFormat
-import android.media.AudioRecord
 import android.media.AudioTrack
-import android.media.MediaRecorder
 import android.util.Log
 import com.hamradio.aaos.radio.transport.describe
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
@@ -39,7 +32,6 @@ import kotlin.coroutines.resume
 
 private const val TAG = "RadioAudio"
 private const val STOP_TIMEOUT_MS = 1500L
-private const val CAPTURE_START_TIMEOUT_MS = 3000L
 private val GENERIC_AUDIO_UUID = UUID.fromString("00001203-0000-1000-8000-00805F9B34FB")
 private val SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 
@@ -49,28 +41,21 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
     private val codec = SbcCodecSession()
     private val receiver = AudioReceivePipeline(codec)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val transmitter = AudioTransmitPipeline(scope, codec, TAG)
     private val stateLock = Any()
-    private val captureLock = Any()
     private val txMutex = Mutex()
     private val connectMutex = Mutex()
     private var generation = 0L
     private var pendingSocket: BluetoothSocket? = null
     private data class Session(val socket: BluetoothSocket, val input: InputStream, val output: OutputStream)
     private var session: Session? = null
-    private var transmitJob: Job? = null
-    private var transmitSession: Session? = null
     private var receiveJob: Job? = null
-    private var recorder: AudioRecord? = null
 
-    private val _isTransmitting = MutableStateFlow(false)
-    override val isTransmitting: StateFlow<Boolean> = _isTransmitting.asStateFlow()
+    override val isTransmitting: StateFlow<Boolean> = transmitter.isTransmitting
     private val _isReceiving = MutableStateFlow(false)
     val isReceiving: StateFlow<Boolean> = _isReceiving.asStateFlow()
     private val _isConnected = MutableStateFlow(false)
     override val isConnected: StateFlow<Boolean> = _isConnected.asStateFlow()
-
-    // Wire marker matches HTCommander audio_engine.dart at 09dfa3ea5ffaa835c20320dbaa3c20fc197a9b26; hardware behavior remains unverified.
-    private val END_AUDIO = byteArrayOf(0x7E, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E)
 
     override suspend fun connect() = connectMutex.withLock {
         val attempt = synchronized(stateLock) {
@@ -189,77 +174,22 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
 
     /** Wait for microphone startup; true means capture started, while isTransmitting tracks its ongoing state. */
     override suspend fun startTransmit(): Boolean = txMutex.withLock {
-        if (transmitJob?.isCompleted == false) return@withLock false
         val connected = synchronized(stateLock) { session } ?: return@withLock false
-        val started = CompletableDeferred<Boolean>()
-        val job = scope.launch(start = CoroutineStart.LAZY) {
-            var record: AudioRecord? = null
-            try {
-                val minSize = AudioRecord.getMinBufferSize(32000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-                check(minSize > 0) { "Unsupported microphone PCM format: $minSize" }
-                val capture = AudioRecord(MediaRecorder.AudioSource.MIC, 32000,
-                    AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
-                    maxOf(minSize, SbcCodec.PCM_BYTES_PER_FRAME * 4))
-                record = capture
-                check(capture.state == AudioRecord.STATE_INITIALIZED) { "AudioRecord initialization failed" }
-                val captureContext = currentCoroutineContext()
-                synchronized(captureLock) {
-                    captureContext.ensureActive()
-                    recorder = capture
-                    capture.startRecording()
-                    check(capture.recordingState == AudioRecord.RECORDSTATE_RECORDING) { "Microphone did not start" }
-                    _isTransmitting.value = true
-                    started.complete(true)
+        transmitter.startLocked(
+            owner = connected,
+            output = connected.output,
+            stillCurrent = { synchronized(stateLock) { session === connected } },
+            forceClose = {
+                synchronized(stateLock) {
+                    close(connected.socket)
+                    if (session === connected) {
+                        session = null
+                        _isConnected.value = false
+                        _isReceiving.value = false
+                    }
                 }
-                codec.resetEncoder()
-                val pcm = ShortArray(SbcCodec.SAMPLES_PER_FRAME)
-                var filled = 0
-                while (isActive && synchronized(stateLock) { session === connected }) {
-                    val count = capture.read(pcm, filled, pcm.size - filled)
-                    if (count <= 0) throw IOException("Microphone read failed: $count")
-                    filled += count
-                    if (filled < pcm.size) continue
-                    currentCoroutineContext().ensureActive()
-                    val encoded = codec.encode(pcm) ?: throw IOException("SBC encoding failed")
-                    connected.output.write(escapeFrame(0x00, encoded))
-                    connected.output.flush()
-                    filled = 0
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "TX failed", e)
-            } finally {
-                started.complete(false)
-                synchronized(captureLock) {
-                    if (recorder === record) recorder = null
-                    try { record?.stop() } catch (_: Exception) {}
-                    try { record?.release() } catch (_: Exception) {}
-                    _isTransmitting.value = false
-                }
-                // Always use this job's stream; an old job must never write to a new session.
-                try {
-                    connected.output.write(END_AUDIO)
-                    connected.output.flush()
-                } catch (e: Exception) {
-                    Log.d(TAG, "End-audio marker could not be sent", e)
-                }
-
-            }
-        }
-        transmitJob = job
-        transmitSession = connected
-        job.start()
-        try {
-            val ready = withTimeoutOrNull(CAPTURE_START_TIMEOUT_MS) { started.await() } == true
-            if (!ready) {
-                withContext(NonCancellable + Dispatchers.IO) { stopTransmitLocked() }
-            }
-            ready
-        } catch (e: CancellationException) {
-            withContext(NonCancellable + Dispatchers.IO) { stopTransmitLocked() }
-            throw e
-        }
+            },
+        )
     }
 
     /** Join the old capture job before accepting another PTT press. */
@@ -267,31 +197,7 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
         txMutex.withLock { stopTransmitLocked() }
     }
 
-    private suspend fun stopTransmitLocked() {
-        val job = transmitJob ?: return
-        job.cancel()
-        synchronized(captureLock) {
-            _isTransmitting.value = false
-            try { recorder?.stop() } catch (_: Exception) {}
-        }
-        if (withTimeoutOrNull(STOP_TIMEOUT_MS) { job.join(); true } != true) {
-            // A blocked output write cannot be cancelled by Job.cancel(). Close the transport.
-            synchronized(stateLock) {
-                transmitSession?.let { close(it.socket) }
-                if (session === transmitSession) {
-                    session = null
-                    _isConnected.value = false
-                    _isReceiving.value = false
-                }
-            }
-            if (withTimeoutOrNull(STOP_TIMEOUT_MS) { job.join(); true } != true) {
-                Log.w(TAG, "TX teardown exceeded timeout; new TX remains disabled until it exits")
-                return // retain job so a new TX cannot race its finally block
-            }
-        }
-        transmitJob = null
-        transmitSession = null
-    }
+    private suspend fun stopTransmitLocked() = transmitter.stopLocked()
 
     // Called with stateLock held; each RX job owns its stream and playback track.
     private fun startReceive(connected: Session) {
@@ -319,7 +225,7 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
                 }
                 scope.launch {
                     txMutex.withLock {
-                        if (transmitSession === connected) stopTransmitLocked()
+                        if (transmitter.isOwnedBy(connected)) stopTransmitLocked()
                     }
                 }
             }
@@ -327,9 +233,6 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
     }
 
     internal suspend fun playFrame(frame: ByteArray, track: AudioTrack) = receiver.playFrame(frame, track)
-
-    private fun escapeFrame(cmd: Byte, data: ByteArray): ByteArray =
-        AudioFraming.escape(cmd, data)
 
     private fun close(socket: BluetoothSocket?) {
         try { socket?.close() } catch (_: IOException) {}

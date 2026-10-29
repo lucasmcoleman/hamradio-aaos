@@ -370,10 +370,6 @@ class RadioController internal constructor(
             )
             return
         }
-        if (channel is BridgeAudioChannel) {
-            _errorEvent.tryEmit("PTT isn't available through the ESP32 bridge yet. Use the radio's own PTT and mic.")
-            return
-        }
         if (!requestAudioFocus()) {
             abandonAudioFocus()
             _errorEvent.tryEmit("Microphone transmit could not obtain audio focus")
