@@ -1161,7 +1161,7 @@ private fun ConnectionSheet(
                     OutlinedTextField(
                         value = addressText,
                         onValueChange = { addressText = it.uppercase() },
-                        placeholder = { Text("AA:BB:CC:DD:EE:FF", color = OnSurfaceMuted) },
+                        placeholder = { Text("AA:BB:CC:DD:EE:FF or BRIDGE: (ESP32 bridge)", color = OnSurfaceMuted) },
                         singleLine = true,
                         leadingIcon = { Icon(Icons.Default.Bluetooth, null, tint = OnSurfaceMuted) },
                         modifier = Modifier.weight(1f),
