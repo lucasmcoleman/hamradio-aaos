@@ -29,6 +29,7 @@
 #include <esp_gap_bt_api.h>
 #include <esp_spp_api.h>
 #include <freertos/stream_buffer.h>
+#include <lwip/sockets.h>
 
 #define SPP_NAME_MAX 32
 
@@ -53,6 +54,13 @@ WiFiServer *server[2];
 WiFiClient client[2];
 bool echoCtl = true;            // print control traffic on the console
 uint32_t lastAttempt = 0;
+uint32_t connectStart = 0;      // when the pending discovery or channel open began
+static const uint32_t CONNECT_TIMEOUT_MS = 15000;  // the radio never answers an open on a channel it isn't serving
+// Audio was on RFCOMM 2 in every capture, whichever channel control was on; 3 also opens but stays silent.
+static const uint8_t AUD_CANDIDATES[] = {2, 3};
+uint8_t audTries = 0;
+uint32_t audDropped = 0;             // audio bytes dropped because the TCP client fell behind
+uint32_t audStallSince = 0;          // when the audio client stopped taking data, 0 if it is keeping up
 
 // Pairing knobs, settable on the console while finding what the radio accepts.
 static const esp_spp_sec_t SEC_MASKS[3] = {ESP_SPP_SEC_NONE, ESP_SPP_SEC_AUTHENTICATE,
@@ -144,7 +152,10 @@ static uint8_t chooseScn(int c) {
     String n = String(foundName[i]); n.toLowerCase();
     if (n.indexOf("audio") >= 0) return foundScn[i];
   }
-  return 0;
+  // SPP discovery doesn't list the radio's audio service, and the DB50-B moves its channels
+  // between connections, so try the channels its audio has been seen on, one per attempt.
+  if (audTries >= sizeof(AUD_CANDIDATES)) return 0;
+  return AUD_CANDIDATES[audTries];
 }
 
 static void gapCb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p) {
@@ -186,6 +197,7 @@ static void connectNext() {
     if (!scn) continue;
     if (c == AUD && !handle[CTL]) return;  // control first
     connecting = true;
+    connectStart = millis();
     out.printf("bt connect %s scn %d\n", NAMES[c], scn);
     esp_spp_connect(SEC_MASKS[secLevel], ESP_SPP_ROLE_MASTER, scn, peer);
     return;
@@ -219,7 +231,8 @@ static void sppCb(esp_spp_cb_event_t event, esp_spp_cb_param_t *p) {
       int c = handle[CTL] ? AUD : CTL;
       if (p->open.status != ESP_SPP_SUCCESS) {
         out.printf("bt open %s FAILED (status %d)\n", NAMES[c], p->open.status);
-        connecting = false;
+        if (c == AUD) { audTries++; connectNext(); }  // next audio candidate, if any
+        else connecting = false;
         break;
       }
       handle[c] = p->open.handle;
@@ -266,7 +279,8 @@ static void startRadio() {
     return;
   }
   connecting = true;
-  lastAttempt = millis();
+  lastAttempt = connectStart = millis();
+  audTries = 0;
   out.printf("bt discovering %s\n", radioMac.c_str());
   esp_spp_start_discovery(peer);
 }
@@ -314,6 +328,7 @@ static void status() {
   else
     out.printf("wifi ap %s  ip %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
   for (int c = 0; c < 2; c++) out.printf("tcp %u %s\n", PORTS[c], client[c] && client[c].connected() ? "client connected" : "idle");
+  out.printf("audio dropped %lu bytes (slow client)\n", (unsigned long)audDropped);
 }
 
 static String otaPass() {
@@ -334,22 +349,32 @@ static void startUpdateServer() {
       []() {
         if (!web.authenticate("bridge", otaPass().c_str())) return web.requestAuthentication();
         bool ok = !Update.hasError();
-        web.send(ok ? 200 : 500, "text/plain", ok ? "updated; restarting\n" : "update FAILED\n");
-        out.println(ok ? "ota update ok; restarting" : "ota update FAILED");
+        web.send(ok ? 200 : 500, "text/plain", ok ? "updated; restarting\n" : "update FAILED; restarting\n");
+        out.println(ok ? "ota update ok; restarting" : "ota update FAILED; restarting");
         delay(500);
-        if (ok) ESP.restart();
+        ESP.restart();  // bluetooth was stopped for the upload
       },
       []() {
         if (!web.authenticate("bridge", otaPass().c_str())) return;
         HTTPUpload &up = web.upload();
         if (up.status == UPLOAD_FILE_START) {
-          out.printf("ota receiving %s\n", up.filename.c_str());
-          Update.begin(UPDATE_SIZE_UNKNOWN);
+          // Once Bluetooth has been busy, Wi-Fi slows enough that uploads time out. Shut it
+          // down for the update; the board restarts afterwards either way.
+          stopRadio();
+          btStop();
+          out.printf("ota receiving %s (bluetooth stopped)\n", up.filename.c_str());
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN)) out.printf("ota begin FAILED: %s\n", Update.errorString());
         } else if (up.status == UPLOAD_FILE_WRITE) {
-          Update.write(up.buf, up.currentSize);
+          if (Update.write(up.buf, up.currentSize) != up.currentSize)
+            out.printf("ota write FAILED at %u: %s\n", (unsigned)up.totalSize, Update.errorString());
         } else if (up.status == UPLOAD_FILE_END) {
-          Update.end(true);
-          out.printf("ota received %u bytes\n", (unsigned)up.totalSize);
+          if (Update.end(true)) out.printf("ota received %u bytes\n", (unsigned)up.totalSize);
+          else out.printf("ota end FAILED: %s\n", Update.errorString());
+        } else if (up.status == UPLOAD_FILE_ABORTED) {
+          Update.abort();
+          out.println("ota upload aborted; restarting to bring bluetooth back");
+          delay(500);
+          ESP.restart();
         }
       });
   web.begin();
@@ -364,7 +389,7 @@ static void command(String line, bool remote = false) {
   arg.trim();
   // Anyone on the network can reach the log port, so it can't change setup or read passwords.
   if (remote && !(cmd == "status" || cmd == "scan" || cmd == "connect" || cmd == "disconnect" || cmd == "echo" || cmd == "tx" ||
-                  cmd == "sec" || cmd == "iocap" || cmd == "pin" || cmd == "unbond")) {
+                  cmd == "sec" || cmd == "iocap" || cmd == "pin" || cmd == "unbond" || cmd == "reboot")) {
     out.printf("'%s' is USB-only\n", cmd.c_str());
     return;
   }
@@ -405,6 +430,7 @@ static void command(String line, bool remote = false) {
     if (arg.length()) { pinCode = arg; prefs.putString("pin", pinCode); }
     out.printf("pin %s\n", pinCode.c_str());
   }
+  else if (cmd == "reboot") { out.println("rebooting"); delay(300); ESP.restart(); }
   else if (cmd == "unbond") {  // forget stored link keys so the next connect pairs fresh
     int n = esp_bt_gap_get_bond_device_num();
     esp_bd_addr_t list[16];
@@ -419,14 +445,14 @@ static void command(String line, bool remote = false) {
     for (size_t i = 0; i + 1 < arg.length() && n < sizeof(buf); i += 2) buf[n++] = strtoul(arg.substring(i, i + 2).c_str(), nullptr, 16);
     out.println(sendToRadio(CTL, buf, n) ? "tx ok" : "tx FAILED: control channel not open");
   }
-  else out.println("commands: status scan connect disconnect mac scn wifi ap appass otapass echo tx sec iocap pin unbond");
+  else out.println("commands: status scan connect disconnect mac scn wifi ap appass otapass echo tx sec iocap pin unbond reboot");
 }
 
 void setup() {
   ringLock = xSemaphoreCreateMutex();
   Serial.begin(115200);
   delay(300);
-  out.println("\nhamradio-bridge starting");
+  out.printf("\nhamradio-bridge starting (built %s %s)\n", __DATE__, __TIME__);
   prefs.begin("bridge", false);
   radioMac = prefs.getString("mac", radioMac);
   wantScn[CTL] = prefs.getUChar("scnctl", 0);
@@ -529,6 +555,14 @@ void loop() {
   drainLog();
   web.handleClient();
 
+  // An open on a channel the radio isn't serving never completes; give up on it so later
+  // attempts aren't blocked (audio moves to its next candidate).
+  if (connecting && millis() - connectStart > CONNECT_TIMEOUT_MS) {
+    out.printf("bt connect timed out (%s)\n", handle[CTL] ? "aud" : "ctl");
+    if (handle[CTL]) { audTries++; connectNext(); }
+    else connecting = false;
+  }
+
   // Keep retrying the radio every 15 s once a TCP client wants it.
   bool wanted = (client[CTL] && client[CTL].connected());
   if (wanted && !handle[CTL] && !connecting && millis() - lastAttempt > 15000) startRadio();
@@ -539,13 +573,48 @@ void loop() {
       if (client[c] && client[c].connected()) client[c].stop();  // newest client wins
       client[c] = server[c]->available();
       client[c].setNoDelay(true);
+      if (c == AUD) {  // blocking sends with a short timeout for live audio (see the write below)
+        int fd = client[c].fd();
+        fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) & ~O_NONBLOCK);
+        struct timeval tv = {0, 20000};
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+      }
       out.printf("tcp %u client %s\n", PORTS[c], client[c].remoteIP().toString().c_str());
       if (!handle[CTL] && !connecting) startRadio();
     }
     size_t n;
+    bool stalled = false;  // this pass's audio send already timed out: discard the rest
     while ((n = xStreamBufferReceive(fromRadio[c], buf, sizeof(buf), 0)) > 0) {
       if (c == CTL && echoCtl) printHex("rx ctl", buf, n);
-      if (client[c] && client[c].connected()) client[c].write(buf, n);
+      if (!client[c] || !client[c].connected()) continue;
+      if (c == CTL) { client[c].write(buf, n); continue; }
+      // Audio is live: if the client isn't keeping up, drop audio rather than block the loop,
+      // which would also stall the control channel. WiFiClient::write retries for up to 10 s,
+      // so send on the socket directly with the short timeout set at accept, at most once a pass.
+      if (stalled) { audDropped += n; continue; }
+      size_t done = 0;
+      while (done < n) {
+        int sent = send(client[c].fd(), buf + done, n - done, 0);
+        if (sent <= 0) {
+          if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            out.printf("tcp %u send error %d; dropping client\n", PORTS[c], errno);
+            client[c].stop();
+          }
+          stalled = true;
+          break;
+        }
+        done += sent;
+      }
+      audDropped += n - done;
+    }
+    if (c == AUD) {
+      if (!stalled) audStallSince = 0;
+      else if (!audStallSince) audStallSince = millis();
+      else if (millis() - audStallSince > 3000 && client[c]) {  // a reader stuck this long is gone
+        out.printf("tcp %u client stalled 3 s; dropping it\n", PORTS[c]);
+        client[c].stop();
+        audStallSince = 0;
+      }
     }
     while (client[c] && client[c].connected() && client[c].available()) {
       n = client[c].read(buf, sizeof(buf));
