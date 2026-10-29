@@ -12,8 +12,16 @@
 //   wifi <ssid> <password>   join a network (stored, never printed)
 //   ap                       forget the network and run as access point
 //   tx <hex>                 send bytes on the control channel; replies print as "rx ctl <hex>"
+//   otapass                  show the password for Wi-Fi firmware updates
+//
+// Over Wi-Fi, for when the board is in the truck:
+//   port 8703  console log (recent backlog, then live); accepts status scan connect
+//              disconnect echo tx. Setup commands stay USB-only.
+//   port 8080  POST /update with the firmware .bin (basic auth "bridge" / otapass)
 #include <Arduino.h>
 #include <Preferences.h>
+#include <Update.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <esp_bt.h>
 #include <esp_bt_main.h>
@@ -46,6 +54,63 @@ WiFiClient client[2];
 bool echoCtl = true;            // print control traffic on the console
 uint32_t lastAttempt = 0;
 
+// Pairing knobs, settable on the console while finding what the radio accepts.
+static const esp_spp_sec_t SEC_MASKS[3] = {ESP_SPP_SEC_NONE, ESP_SPP_SEC_AUTHENTICATE,
+                                           ESP_SPP_SEC_AUTHENTICATE | ESP_SPP_SEC_ENCRYPT};
+static const char *SEC_NAMES[3] = {"none", "auth", "encrypt"};
+static const esp_bt_io_cap_t IOCAPS[4] = {ESP_BT_IO_CAP_NONE, ESP_BT_IO_CAP_IO, ESP_BT_IO_CAP_OUT, ESP_BT_IO_CAP_IN};
+static const char *IOCAP_NAMES[4] = {"none", "yesno", "display", "keyboard"};
+uint8_t secLevel = 1, ioCap = 0;
+String pinCode = "0000";
+
+static int indexOf(const char *const *names, int n, const String &s) {
+  for (int i = 0; i < n; i++) if (s == names[i]) return i;
+  return -1;
+}
+
+static void applyIoCap() {
+  esp_bt_sp_param_t param = ESP_BT_SP_IOCAP_MODE;
+  esp_bt_io_cap_t cap = IOCAPS[ioCap];
+  esp_bt_gap_set_security_param(param, &cap, sizeof(cap));
+}
+
+// Console output goes to USB serial and to a ring the Wi-Fi log port replays. Bluetooth
+// callbacks print from their own task, so ring writes are locked.
+static const uint16_t LOG_PORT = 8703;
+static const size_t RING = 8192;
+static char ring[RING];
+static uint32_t ringW = 0, ringR = 0;  // total bytes written; next byte the log client gets
+static SemaphoreHandle_t ringLock;
+WiFiServer logServer(LOG_PORT);
+WiFiClient logClient;
+WebServer web(8080);
+
+class Tee : public Print {
+ public:
+  size_t write(uint8_t b) override { return write(&b, 1); }
+  size_t write(const uint8_t *d, size_t n) override {
+    Serial.write(d, n);
+    if (ringLock && xSemaphoreTake(ringLock, pdMS_TO_TICKS(20))) {
+      for (size_t i = 0; i < n; i++) ring[(ringW + i) % RING] = d[i];
+      ringW += n;
+      xSemaphoreGive(ringLock);
+    }
+    return n;
+  }
+} out;
+
+static void drainLog() {
+  if (!logClient || !logClient.connected()) return;
+  char chunk[512];
+  size_t n = 0;
+  if (xSemaphoreTake(ringLock, pdMS_TO_TICKS(20))) {
+    if (ringW - ringR > RING) ringR = ringW - RING;  // client fell behind: skip to the oldest kept byte
+    while (ringR < ringW && n < sizeof(chunk)) chunk[n++] = ring[ringR++ % RING];
+    xSemaphoreGive(ringLock);
+  }
+  if (n) logClient.write((const uint8_t *)chunk, n);
+}
+
 static bool parseMac(const String &s, esp_bd_addr_t out) {
   int v[6];
   if (sscanf(s.c_str(), "%x:%x:%x:%x:%x:%x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
@@ -54,9 +119,9 @@ static bool parseMac(const String &s, esp_bd_addr_t out) {
 }
 
 static void printHex(const char *tag, const uint8_t *d, size_t n) {
-  Serial.printf("%s ", tag);
-  for (size_t i = 0; i < n; i++) Serial.printf("%02X", d[i]);
-  Serial.println();
+  out.printf("%s ", tag);
+  for (size_t i = 0; i < n; i++) out.printf("%02X", d[i]);
+  out.println();
 }
 
 static int channelForHandle(uint32_t h) {
@@ -85,19 +150,31 @@ static uint8_t chooseScn(int c) {
 static void gapCb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *p) {
   switch (event) {
     case ESP_BT_GAP_AUTH_CMPL_EVT:
-      Serial.printf("bt auth %s (status %d)\n", p->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS ? "ok" : "FAILED", p->auth_cmpl.stat);
+      out.printf("bt auth %s (status %d)\n", p->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS ? "ok" : "FAILED", p->auth_cmpl.stat);
       break;
     case ESP_BT_GAP_PIN_REQ_EVT: {  // legacy pairing fallback
-      esp_bt_pin_code_t pin = {'0', '0', '0', '0'};
-      esp_bt_gap_pin_reply(p->pin_req.bda, true, 4, pin);
-      Serial.println("bt pin request answered with 0000");
+      esp_bt_pin_code_t code;
+      uint8_t len = min((size_t)ESP_BT_PIN_CODE_LEN, (size_t)pinCode.length());
+      memcpy(code, pinCode.c_str(), len);
+      esp_bt_gap_pin_reply(p->pin_req.bda, true, len, code);
+      out.printf("bt pin request (min 16 digits: %d) answered with %s\n", p->pin_req.min_16_digit, pinCode.c_str());
       break;
     }
     case ESP_BT_GAP_CFM_REQ_EVT:     // SSP numeric comparison: no screen here, so accept
       esp_bt_gap_ssp_confirm_reply(p->cfm_req.bda, true);
-      Serial.printf("bt ssp confirm %06lu accepted\n", (unsigned long)p->cfm_req.num_val);
+      out.printf("bt ssp confirm %06lu accepted\n", (unsigned long)p->cfm_req.num_val);
+      break;
+    case ESP_BT_GAP_KEY_NOTIF_EVT:
+      out.printf("bt ssp passkey shown %06lu\n", (unsigned long)p->key_notif.passkey);
+      break;
+    case ESP_BT_GAP_KEY_REQ_EVT:     // radio wants a passkey typed here: send the PIN as a number
+      esp_bt_gap_ssp_passkey_reply(p->key_req.bda, true, pinCode.toInt());
+      out.printf("bt ssp passkey request answered with %s\n", pinCode.c_str());
+      break;
+    case ESP_BT_GAP_MODE_CHG_EVT:
       break;
     default:
+      out.printf("bt gap event %d\n", event);
       break;
   }
 }
@@ -109,8 +186,8 @@ static void connectNext() {
     if (!scn) continue;
     if (c == AUD && !handle[CTL]) return;  // control first
     connecting = true;
-    Serial.printf("bt connect %s scn %d\n", NAMES[c], scn);
-    esp_spp_connect(ESP_SPP_SEC_AUTHENTICATE, ESP_SPP_ROLE_MASTER, scn, peer);
+    out.printf("bt connect %s scn %d\n", NAMES[c], scn);
+    esp_spp_connect(SEC_MASKS[secLevel], ESP_SPP_ROLE_MASTER, scn, peer);
     return;
   }
   connecting = false;
@@ -119,11 +196,11 @@ static void connectNext() {
 static void sppCb(esp_spp_cb_event_t event, esp_spp_cb_param_t *p) {
   switch (event) {
     case ESP_SPP_INIT_EVT:
-      Serial.println("bt spp ready");
+      out.println("bt spp ready");
       break;
     case ESP_SPP_DISCOVERY_COMP_EVT:
       if (p->disc_comp.status != ESP_SPP_SUCCESS) {
-        Serial.printf("bt discovery failed (status %d); is the radio on and in range?\n", p->disc_comp.status);
+        out.printf("bt discovery failed (status %d); is the radio on and in range?\n", p->disc_comp.status);
         foundCount = 0;
         connecting = false;
         break;
@@ -133,27 +210,27 @@ static void sppCb(esp_spp_cb_event_t event, esp_spp_cb_param_t *p) {
         foundScn[i] = p->disc_comp.scn[i];
         strncpy(foundName[i], p->disc_comp.service_name[i] ? p->disc_comp.service_name[i] : "", SPP_NAME_MAX);
         foundName[i][SPP_NAME_MAX] = 0;
-        Serial.printf("bt service scn %d \"%s\"\n", foundScn[i], foundName[i]);
+        out.printf("bt service scn %d \"%s\"\n", foundScn[i], foundName[i]);
       }
-      Serial.printf("bt chose ctl scn %d, aud scn %d\n", chooseScn(CTL), chooseScn(AUD));
+      out.printf("bt chose ctl scn %d, aud scn %d\n", chooseScn(CTL), chooseScn(AUD));
       connectNext();
       break;
     case ESP_SPP_OPEN_EVT: {
       int c = handle[CTL] ? AUD : CTL;
       if (p->open.status != ESP_SPP_SUCCESS) {
-        Serial.printf("bt open %s FAILED (status %d)\n", NAMES[c], p->open.status);
+        out.printf("bt open %s FAILED (status %d)\n", NAMES[c], p->open.status);
         connecting = false;
         break;
       }
       handle[c] = p->open.handle;
       congested[c] = false;
-      Serial.printf("bt open %s ok (handle %lu)\n", NAMES[c], (unsigned long)p->open.handle);
+      out.printf("bt open %s ok (handle %lu)\n", NAMES[c], (unsigned long)p->open.handle);
       connectNext();
       break;
     }
     case ESP_SPP_CL_INIT_EVT:
       if (p->cl_init.status != ESP_SPP_SUCCESS) {
-        Serial.printf("bt client init FAILED (status %d)\n", p->cl_init.status);
+        out.printf("bt client init FAILED (status %d)\n", p->cl_init.status);
         connecting = false;
       }
       break;
@@ -161,7 +238,7 @@ static void sppCb(esp_spp_cb_event_t event, esp_spp_cb_param_t *p) {
       int c = channelForHandle(p->close.handle);
       if (c >= 0) {
         handle[c] = 0;
-        Serial.printf("bt close %s\n", NAMES[c]);
+        out.printf("bt close %s\n", NAMES[c]);
       }
       break;
     }
@@ -169,7 +246,7 @@ static void sppCb(esp_spp_cb_event_t event, esp_spp_cb_param_t *p) {
       int c = channelForHandle(p->data_ind.handle);
       if (c < 0) break;
       size_t sent = xStreamBufferSend(fromRadio[c], p->data_ind.data, p->data_ind.len, 0);
-      if (sent < p->data_ind.len) Serial.printf("bt %s buffer full, dropped %u bytes\n", NAMES[c], (unsigned)(p->data_ind.len - sent));
+      if (sent < p->data_ind.len) out.printf("bt %s buffer full, dropped %u bytes\n", NAMES[c], (unsigned)(p->data_ind.len - sent));
       break;
     }
     case ESP_SPP_CONG_EVT: {
@@ -185,12 +262,12 @@ static void sppCb(esp_spp_cb_event_t event, esp_spp_cb_param_t *p) {
 static void startRadio() {
   if (handle[CTL] || connecting) return;
   if (!parseMac(radioMac, peer)) {
-    Serial.println("bad radio mac; set it with: mac AA:BB:CC:DD:EE:FF");
+    out.println("bad radio mac; set it with: mac AA:BB:CC:DD:EE:FF");
     return;
   }
   connecting = true;
   lastAttempt = millis();
-  Serial.printf("bt discovering %s\n", radioMac.c_str());
+  out.printf("bt discovering %s\n", radioMac.c_str());
   esp_spp_start_discovery(peer);
 }
 
@@ -213,7 +290,7 @@ static void startWifi() {
     WiFi.mode(WIFI_STA);
     WiFi.setHostname("hamradio-bridge");
     WiFi.begin(ssid.c_str(), prefs.getString("pass", "").c_str());
-    Serial.printf("wifi joining \"%s\"\n", ssid.c_str());
+    out.printf("wifi joining \"%s\"\n", ssid.c_str());
   } else {
     WiFi.mode(WIFI_AP);
     String appass = prefs.getString("appass", "");
@@ -225,66 +302,138 @@ static void startWifi() {
       prefs.putString("appass", appass);
     }
     WiFi.softAP(AP_SSID, appass.c_str());
-    Serial.printf("wifi access point \"%s\" at %s (password: type 'appass' on this console)\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+    out.printf("wifi access point \"%s\" at %s (password: type 'appass' on this console)\n", AP_SSID, WiFi.softAPIP().toString().c_str());
   }
 }
 
 static void status() {
-  Serial.printf("radio %s  ctl %s  aud %s\n", radioMac.c_str(), handle[CTL] ? "open" : "closed", handle[AUD] ? "open" : "closed");
-  Serial.printf("scn wanted ctl %d aud %d; discovered %d services\n", wantScn[CTL], wantScn[AUD], foundCount);
+  out.printf("radio %s  ctl %s  aud %s\n", radioMac.c_str(), handle[CTL] ? "open" : "closed", handle[AUD] ? "open" : "closed");
+  out.printf("scn wanted ctl %d aud %d; discovered %d services\n", wantScn[CTL], wantScn[AUD], foundCount);
   if (WiFi.getMode() == WIFI_STA)
-    Serial.printf("wifi sta %s  ip %s\n", WiFi.isConnected() ? "connected" : "not connected", WiFi.localIP().toString().c_str());
+    out.printf("wifi sta %s  ip %s\n", WiFi.isConnected() ? "connected" : "not connected", WiFi.localIP().toString().c_str());
   else
-    Serial.printf("wifi ap %s  ip %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
-  for (int c = 0; c < 2; c++) Serial.printf("tcp %u %s\n", PORTS[c], client[c] && client[c].connected() ? "client connected" : "idle");
+    out.printf("wifi ap %s  ip %s\n", AP_SSID, WiFi.softAPIP().toString().c_str());
+  for (int c = 0; c < 2; c++) out.printf("tcp %u %s\n", PORTS[c], client[c] && client[c].connected() ? "client connected" : "idle");
 }
 
-static void command(String line) {
+static String otaPass() {
+  String pass = prefs.getString("otapass", "");
+  if (pass.length() < 8) {  // per-board random password, shown only on the USB console
+    char buf[13];
+    for (int i = 0; i < 12; i++) buf[i] = "abcdefghjkmnpqrstuvwxyz23456789"[esp_random() % 31];
+    buf[12] = 0;
+    pass = buf;
+    prefs.putString("otapass", pass);
+  }
+  return pass;
+}
+
+static void startUpdateServer() {
+  web.on(
+      "/update", HTTP_POST,
+      []() {
+        if (!web.authenticate("bridge", otaPass().c_str())) return web.requestAuthentication();
+        bool ok = !Update.hasError();
+        web.send(ok ? 200 : 500, "text/plain", ok ? "updated; restarting\n" : "update FAILED\n");
+        out.println(ok ? "ota update ok; restarting" : "ota update FAILED");
+        delay(500);
+        if (ok) ESP.restart();
+      },
+      []() {
+        if (!web.authenticate("bridge", otaPass().c_str())) return;
+        HTTPUpload &up = web.upload();
+        if (up.status == UPLOAD_FILE_START) {
+          out.printf("ota receiving %s\n", up.filename.c_str());
+          Update.begin(UPDATE_SIZE_UNKNOWN);
+        } else if (up.status == UPLOAD_FILE_WRITE) {
+          Update.write(up.buf, up.currentSize);
+        } else if (up.status == UPLOAD_FILE_END) {
+          Update.end(true);
+          out.printf("ota received %u bytes\n", (unsigned)up.totalSize);
+        }
+      });
+  web.begin();
+}
+
+static void command(String line, bool remote = false) {
   line.trim();
   if (!line.length()) return;
   int sp = line.indexOf(' ');
   String cmd = sp < 0 ? line : line.substring(0, sp);
   String arg = sp < 0 ? "" : line.substring(sp + 1);
   arg.trim();
+  // Anyone on the network can reach the log port, so it can't change setup or read passwords.
+  if (remote && !(cmd == "status" || cmd == "scan" || cmd == "connect" || cmd == "disconnect" || cmd == "echo" || cmd == "tx" ||
+                  cmd == "sec" || cmd == "iocap" || cmd == "pin" || cmd == "unbond")) {
+    out.printf("'%s' is USB-only\n", cmd.c_str());
+    return;
+  }
   if (cmd == "status") status();
   else if (cmd == "scan" || cmd == "connect") { foundCount = -1; startRadio(); }
   else if (cmd == "disconnect") stopRadio();
-  else if (cmd == "mac") { radioMac = arg; radioMac.toUpperCase(); prefs.putString("mac", radioMac); Serial.printf("radio mac %s\n", radioMac.c_str()); }
+  else if (cmd == "mac") { radioMac = arg; radioMac.toUpperCase(); prefs.putString("mac", radioMac); out.printf("radio mac %s\n", radioMac.c_str()); }
   else if (cmd == "scn") {
     int a = 0, b = 0;
     sscanf(arg.c_str(), "%d %d", &a, &b);
     wantScn[CTL] = a; wantScn[AUD] = b;
     prefs.putUChar("scnctl", a); prefs.putUChar("scnaud", b);
-    Serial.printf("scn ctl %d aud %d\n", a, b);
+    out.printf("scn ctl %d aud %d\n", a, b);
   }
   else if (cmd == "wifi") {
     int s2 = arg.indexOf(' ');
-    if (s2 < 0) { Serial.println("usage: wifi <ssid> <password>"); return; }
+    if (s2 < 0) { out.println("usage: wifi <ssid> <password>"); return; }
     prefs.putString("ssid", arg.substring(0, s2));
     prefs.putString("pass", arg.substring(s2 + 1));
-    Serial.println("wifi saved; restarting wifi");
+    out.println("wifi saved; restarting wifi");
     startWifi();
   }
   else if (cmd == "ap") { prefs.remove("ssid"); prefs.remove("pass"); startWifi(); }
-  else if (cmd == "appass") Serial.printf("ap password %s\n", prefs.getString("appass", "").c_str());
-  else if (cmd == "echo") { echoCtl = arg != "off"; Serial.printf("echo %s\n", echoCtl ? "on" : "off"); }
+  else if (cmd == "appass") out.printf("ap password %s\n", prefs.getString("appass", "").c_str());
+  else if (cmd == "otapass") Serial.printf("ota password %s\n", otaPass().c_str());  // USB only, never to the log ring
+  else if (cmd == "echo") { echoCtl = arg != "off"; out.printf("echo %s\n", echoCtl ? "on" : "off"); }
+  else if (cmd == "sec") {
+    int i = indexOf(SEC_NAMES, 3, arg);
+    if (i >= 0) { secLevel = i; prefs.putUChar("sec", i); }
+    out.printf("sec %s (none|auth|encrypt)\n", SEC_NAMES[secLevel]);
+  }
+  else if (cmd == "iocap") {
+    int i = indexOf(IOCAP_NAMES, 4, arg);
+    if (i >= 0) { ioCap = i; prefs.putUChar("iocap", i); applyIoCap(); }
+    out.printf("iocap %s (none|yesno|display|keyboard)\n", IOCAP_NAMES[ioCap]);
+  }
+  else if (cmd == "pin") {
+    if (arg.length()) { pinCode = arg; prefs.putString("pin", pinCode); }
+    out.printf("pin %s\n", pinCode.c_str());
+  }
+  else if (cmd == "unbond") {  // forget stored link keys so the next connect pairs fresh
+    int n = esp_bt_gap_get_bond_device_num();
+    esp_bd_addr_t list[16];
+    if (n > 16) n = 16;
+    esp_bt_gap_get_bond_device_list(&n, list);
+    for (int i = 0; i < n; i++) esp_bt_gap_remove_bond_device(list[i]);
+    out.printf("removed %d bonds\n", n);
+  }
   else if (cmd == "tx") {
     uint8_t buf[256];
     size_t n = 0;
     for (size_t i = 0; i + 1 < arg.length() && n < sizeof(buf); i += 2) buf[n++] = strtoul(arg.substring(i, i + 2).c_str(), nullptr, 16);
-    Serial.println(sendToRadio(CTL, buf, n) ? "tx ok" : "tx FAILED: control channel not open");
+    out.println(sendToRadio(CTL, buf, n) ? "tx ok" : "tx FAILED: control channel not open");
   }
-  else Serial.println("commands: status scan connect disconnect mac scn wifi ap appass echo tx");
+  else out.println("commands: status scan connect disconnect mac scn wifi ap appass otapass echo tx sec iocap pin unbond");
 }
 
 void setup() {
+  ringLock = xSemaphoreCreateMutex();
   Serial.begin(115200);
   delay(300);
-  Serial.println("\nhamradio-bridge starting");
+  out.println("\nhamradio-bridge starting");
   prefs.begin("bridge", false);
   radioMac = prefs.getString("mac", radioMac);
   wantScn[CTL] = prefs.getUChar("scnctl", 0);
   wantScn[AUD] = prefs.getUChar("scnaud", 0);
+  secLevel = min((int)prefs.getUChar("sec", 1), 2);
+  ioCap = min((int)prefs.getUChar("iocap", 0), 3);
+  pinCode = prefs.getString("pin", pinCode);
   for (int c = 0; c < 2; c++) {
     fromRadio[c] = xStreamBufferCreate(c == AUD ? 16384 : 4096, 1);
     server[c] = new WiFiServer(PORTS[c]);
@@ -309,48 +458,49 @@ void setup() {
   // the same order BluetoothSerial uses. INVALID_STATE on a bluedroid step is
   // treated as "already up"; success is read from the FINAL status only.
   auto okOrDone = [](esp_err_t e) { return e == ESP_OK || e == ESP_ERR_INVALID_STATE; };
-  Serial.printf("btStarted at boot: %d, controller status: %d, bluedroid: %d\n",
+  out.printf("btStarted at boot: %d, controller status: %d, bluedroid: %d\n",
                 (int)btStarted(), (int)esp_bt_controller_get_status(),
                 (int)esp_bluedroid_get_status());
 
   bool btUp = false;
   if (!btStart()) {
-    Serial.printf("btStart() FAILED (controller status %d)\n",
+    out.printf("btStart() FAILED (controller status %d)\n",
                   (int)esp_bt_controller_get_status());
   } else {
     esp_err_t e = esp_bluedroid_init();
-    Serial.printf("bluedroid_init -> 0x%x (%s)\n", e, esp_err_to_name(e));
+    out.printf("bluedroid_init -> 0x%x (%s)\n", e, esp_err_to_name(e));
     if (okOrDone(e)) {
       e = esp_bluedroid_enable();
-      Serial.printf("bluedroid_enable -> 0x%x (%s)\n", e, esp_err_to_name(e));
+      out.printf("bluedroid_enable -> 0x%x (%s)\n", e, esp_err_to_name(e));
     }
-    Serial.printf("bt final status: controller %d, bluedroid %d\n",
+    out.printf("bt final status: controller %d, bluedroid %d\n",
                   (int)esp_bt_controller_get_status(), (int)esp_bluedroid_get_status());
     btUp = (esp_bt_controller_get_status() == ESP_BT_CONTROLLER_STATUS_ENABLED &&
             esp_bluedroid_get_status() == ESP_BLUEDROID_STATUS_ENABLED);
   }
 
   if (!btUp) {
-    Serial.println("bluetooth unavailable; console + Wi-Fi stay up so you can inspect state");
+    out.println("bluetooth unavailable; console + Wi-Fi stay up so you can inspect state");
   } else {
     esp_bt_dev_set_device_name("hamradio-bridge");
     esp_bt_gap_register_callback(gapCb);
-    esp_bt_sp_param_t param = ESP_BT_SP_IOCAP_MODE;
-    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
-    esp_bt_gap_set_security_param(param, &iocap, sizeof(iocap));
+    applyIoCap();
+    out.printf("pairing: sec %s, iocap %s\n", SEC_NAMES[secLevel], IOCAP_NAMES[ioCap]);
     esp_spp_register_callback(sppCb);
     esp_spp_init(ESP_SPP_MODE_CB);
     const uint8_t *own = esp_bt_dev_get_address();
     if (own)
-      Serial.printf("bridge bt address %02X:%02X:%02X:%02X:%02X:%02X\n",
+      out.printf("bridge bt address %02X:%02X:%02X:%02X:%02X:%02X\n",
                     own[0], own[1], own[2], own[3], own[4], own[5]);
     else
-      Serial.println("bridge bt address unavailable");
+      out.println("bridge bt address unavailable");
   }
 
   startWifi();
   for (int c = 0; c < 2; c++) { server[c]->begin(); server[c]->setNoDelay(true); }
-  Serial.println("type 'connect' to pair with the radio, 'status' for state");
+  logServer.begin();
+  startUpdateServer();
+  out.println("type 'connect' to pair with the radio, 'status' for state");
 }
 
 void loop() {
@@ -360,6 +510,24 @@ void loop() {
     if (ch == '\n' || ch == '\r') { command(line); line = ""; }
     else if (line.length() < 300) line += ch;
   }
+
+  static String remoteLine;
+  if (logServer.hasClient()) {
+    if (logClient && logClient.connected()) logClient.stop();
+    logClient = logServer.available();
+    remoteLine = "";
+    if (xSemaphoreTake(ringLock, pdMS_TO_TICKS(20))) {  // replay what's still in the ring
+      ringR = ringW > RING ? ringW - RING : 0;
+      xSemaphoreGive(ringLock);
+    }
+  }
+  while (logClient && logClient.connected() && logClient.available()) {
+    char ch = logClient.read();
+    if (ch == '\n' || ch == '\r') { command(remoteLine, true); remoteLine = ""; }
+    else if (remoteLine.length() < 300) remoteLine += ch;
+  }
+  drainLog();
+  web.handleClient();
 
   // Keep retrying the radio every 15 s once a TCP client wants it.
   bool wanted = (client[CTL] && client[CTL].connected());
@@ -371,7 +539,7 @@ void loop() {
       if (client[c] && client[c].connected()) client[c].stop();  // newest client wins
       client[c] = server[c]->available();
       client[c].setNoDelay(true);
-      Serial.printf("tcp %u client %s\n", PORTS[c], client[c].remoteIP().toString().c_str());
+      out.printf("tcp %u client %s\n", PORTS[c], client[c].remoteIP().toString().c_str());
       if (!handle[CTL] && !connecting) startRadio();
     }
     size_t n;
