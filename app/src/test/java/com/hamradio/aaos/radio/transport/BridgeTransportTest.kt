@@ -59,8 +59,10 @@ class BridgeTransportTest {
             }
         }
         val t = BridgeTransport("bridge:127.0.0.1:${server.localPort}")
+        assertEquals(null, t.connectedHost)
         t.connect()
         assertEquals(ConnectionState.CONNECTED, t.connectionState.value)
+        assertEquals("127.0.0.1", t.connectedHost)
         t.send(RadioCommands.getDevInfo())
         val got = withTimeout(5_000) { t.inboundMessages.first() }
         assertEquals(reply, got)
@@ -68,6 +70,7 @@ class BridgeTransportTest {
         assertArrayEquals(expected, received)
         t.disconnect()
         assertEquals(ConnectionState.DISCONNECTED, t.connectionState.value)
+        assertEquals(null, t.connectedHost)
     }
 
     @Test fun bridgeClosingIsReportedAsError() = runBlocking {

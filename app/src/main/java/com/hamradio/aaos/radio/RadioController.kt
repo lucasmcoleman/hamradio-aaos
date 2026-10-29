@@ -10,9 +10,11 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import com.hamradio.aaos.radio.audio.BridgeAudioChannel
 import com.hamradio.aaos.radio.audio.RadioAudioChannel
 import com.hamradio.aaos.radio.audio.RadioAudioControl
 import com.hamradio.aaos.radio.audio.MockRadioAudioChannel
+import com.hamradio.aaos.radio.transport.BridgeTransport
 import com.hamradio.aaos.radio.transport.FailoverTransport
 import com.hamradio.aaos.radio.transport.MockTransport
 import com.hamradio.aaos.radio.transport.RfcommTransport
@@ -51,6 +53,7 @@ internal fun selectRadioAudio(context: Context, target: IRadioTransport): RadioA
     when (target) {
         is MockTransport -> MockRadioAudioChannel(context)
         is RfcommTransport -> RadioAudioChannel(context, target.deviceAddress)
+        is BridgeTransport -> BridgeAudioChannel(target)
         is FailoverTransport -> selectRadioAudio(context, target.activeTransport)
         else -> null
     }
@@ -365,6 +368,10 @@ class RadioController internal constructor(
                 if (_controlOnly.value) "PTT needs classic Bluetooth. Over BLE, use the radio's own PTT and mic."
                 else "Audio channel is not ready for microphone transmit"
             )
+            return
+        }
+        if (channel is BridgeAudioChannel) {
+            _errorEvent.tryEmit("PTT isn't available through the ESP32 bridge yet. Use the radio's own PTT and mic.")
             return
         }
         if (!requestAudioFocus()) {

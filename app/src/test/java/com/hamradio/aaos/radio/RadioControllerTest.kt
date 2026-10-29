@@ -43,6 +43,14 @@ class RadioControllerTest {
         }
     }
 
+    @Test fun bridgeTransportGetsReceiveOnlyBridgeAudio() = runTest {
+        val audio = selectRadioAudio(context, BridgeTransport("bridge:127.0.0.1", backgroundScope))
+        try {
+            assertTrue(audio is com.hamradio.aaos.radio.audio.BridgeAudioChannel)
+            assertFalse(audio!!.startTransmit())
+        } finally { audio?.close() }
+    }
+
     private class FakeTransport(val pending: Boolean = false) : IRadioTransport {
         val state = MutableStateFlow(ConnectionState.DISCONNECTED)
         override val connectionState = state.asStateFlow()

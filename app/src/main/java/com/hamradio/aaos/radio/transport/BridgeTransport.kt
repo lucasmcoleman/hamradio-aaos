@@ -75,6 +75,10 @@ class BridgeTransport(
     /** Last address the scan found, tried first on reconnect so a brief drop doesn't rescan. */
     @Volatile private var discoveredHost: String? = null
 
+    /** Host of the live control connection (the scanned address when auto-discovering), else null. */
+    @Volatile var connectedHost: String? = null
+        private set
+
     private suspend fun resolveHost(): String {
         if (!autoDiscover) return host
         discoveredHost?.let { return it }
@@ -84,7 +88,7 @@ class BridgeTransport(
     }
 
     override suspend fun connect(): Unit = withContext(Dispatchers.IO) {
-        val old = synchronized(ownership) { current.also { current = null } }
+        val old = synchronized(ownership) { current.also { current = null; connectedHost = null } }
         old?.let { close(it) }
         _state.value = ConnectionState.CONNECTING
         val connection = Connection(Socket())
@@ -98,6 +102,7 @@ class BridgeTransport(
             connection.output = connection.socket.getOutputStream()
             val started = synchronized(ownership) {
                 if (current !== connection) return@synchronized false
+                connectedHost = target
                 _state.value = ConnectionState.CONNECTED
                 connection.reader = scope.launch { readLoop(connection) }
                 true
@@ -137,6 +142,7 @@ class BridgeTransport(
         val connection = synchronized(ownership) {
             val old = current
             current = null
+            connectedHost = null
             _state.value = ConnectionState.DISCONNECTED
             old
         }
@@ -194,6 +200,7 @@ class BridgeTransport(
         synchronized(ownership) {
             if (current === connection) {
                 current = null
+                connectedHost = null
                 _state.value = state
             }
         }

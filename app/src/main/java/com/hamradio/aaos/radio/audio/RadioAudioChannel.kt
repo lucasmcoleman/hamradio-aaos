@@ -4,7 +4,6 @@ import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothSocket
 import android.content.Context
-import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
@@ -32,7 +31,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -40,7 +38,6 @@ import java.util.UUID
 import kotlin.coroutines.resume
 
 private const val TAG = "RadioAudio"
-private const val MAX_RX_FRAME_BYTES = 8192
 private const val STOP_TIMEOUT_MS = 1500L
 private const val CAPTURE_START_TIMEOUT_MS = 3000L
 private val GENERIC_AUDIO_UUID = UUID.fromString("00001203-0000-1000-8000-00805F9B34FB")
@@ -50,6 +47,7 @@ private val SPP_UUID = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB")
 @SuppressLint("MissingPermission")
 class RadioAudioChannel(private val context: Context, private val deviceAddress: String) : RadioAudioControl {
     private val codec = SbcCodecSession()
+    private val receiver = AudioReceivePipeline(codec)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val stateLock = Any()
     private val captureLock = Any()
@@ -298,45 +296,12 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
     // Called with stateLock held; each RX job owns its stream and playback track.
     private fun startReceive(connected: Session) {
         receiveJob = scope.launch {
-            var track: AudioTrack? = null
             try {
-                val minSize = AudioTrack.getMinBufferSize(32000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
-                check(minSize > 0) { "Unsupported playback PCM format: $minSize" }
-                val playback = AudioTrack.Builder()
-                    .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
-                    .setAudioFormat(AudioFormat.Builder().setSampleRate(32000)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).setEncoding(AudioFormat.ENCODING_PCM_16BIT).build())
-                    .setBufferSizeInBytes(maxOf(minSize, SbcCodec.PCM_BYTES_PER_FRAME * 4))
-                    .setTransferMode(AudioTrack.MODE_STREAM).build()
-                track = playback
-                check(playback.state == AudioTrack.STATE_INITIALIZED) { "AudioTrack initialization failed" }
-                codec.resetDecoder()
-                playback.play()
-                synchronized(stateLock) {
-                    if (session !== connected) return@launch
-                    _isReceiving.value = true
-                }
-                val readBuffer = ByteArray(1024)
-                val frame = ByteArrayOutputStream(MAX_RX_FRAME_BYTES)
-                var collecting = false
-                while (isActive) {
-                    val count = connected.input.read(readBuffer)
-                    if (count < 0) break
-                    if (count == 0) throw IOException("Audio stream returned an empty read")
-                    for (index in 0 until count) {
-                        currentCoroutineContext().ensureActive()
-                        val value = readBuffer[index].toInt() and 0xff
-                        if (value == 0x7e) {
-                            if (collecting && frame.size() > 0) playFrame(frame.toByteArray(), playback)
-                            frame.reset()
-                            collecting = true // also supports adjacent frames sharing one delimiter
-                        } else if (collecting) {
-                            if (frame.size() == MAX_RX_FRAME_BYTES) {
-                                frame.reset()
-                                collecting = false // discard oversized frame until the next delimiter
-                            } else frame.write(value)
-                        }
+                receiver.play(connected.input) {
+                    synchronized(stateLock) {
+                        if (session !== connected) return@play false
+                        _isReceiving.value = true
+                        true
                     }
                 }
             } catch (e: CancellationException) {
@@ -344,8 +309,6 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
             } catch (e: Exception) {
                 Log.e(TAG, "RX failed", e)
             } finally {
-                try { track?.stop() } catch (_: Exception) {}
-                try { track?.release() } catch (_: Exception) {}
                 synchronized(stateLock) {
                     if (session === connected) {
                         close(connected.socket)
@@ -363,37 +326,7 @@ class RadioAudioChannel(private val context: Context, private val deviceAddress:
         }
     }
 
-    internal suspend fun playFrame(frame: ByteArray, track: AudioTrack) {
-        if (frame.isEmpty()) return
-        if (frame[0] == 1.toByte()) {
-            codec.resetDecoder()
-            return
-        }
-        // HTCommander 09dfa3e: 0x00 and 0x03 are RX; 0x09 is our TX echo.
-        if (frame.size < 2 || (frame[0] != 0.toByte() && frame[0] != 3.toByte())) return
-        val payload = unescapeFrame(frame, 1) ?: return
-        var offset = 0
-        while (offset < payload.size) {
-            currentCoroutineContext().ensureActive()
-            val length = codec.frameLength(payload, offset)
-            if (length == null) { offset++; continue }
-            val pcm = codec.decode(payload, offset)
-            if (pcm != null) {
-                var written = 0
-                while (written < pcm.size) {
-                    currentCoroutineContext().ensureActive()
-                    // Nonblocking writes keep disconnect cancellation observable if playback stalls.
-                    val count = track.write(pcm, written, pcm.size - written, AudioTrack.WRITE_NON_BLOCKING)
-                    if (count < 0) throw IOException("AudioTrack write failed: $count")
-                    if (count == 0) kotlinx.coroutines.delay(5) else written += count
-                }
-            }
-            offset += length
-        }
-    }
-
-    private fun unescapeFrame(data: ByteArray, start: Int): ByteArray? =
-        AudioFraming.unescape(data, start)
+    internal suspend fun playFrame(frame: ByteArray, track: AudioTrack) = receiver.playFrame(frame, track)
 
     private fun escapeFrame(cmd: Byte, data: ByteArray): ByteArray =
         AudioFraming.escape(cmd, data)
